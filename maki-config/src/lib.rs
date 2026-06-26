@@ -65,6 +65,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "edit",
     "glob",
     "grep",
+    "hashedit",
     "index",
     "memory",
     "multiedit",
@@ -625,7 +626,7 @@ impl ToolOutputLines {
             "index" => self.index,
             "grep" | "glob" => self.grep,
             "read" => self.read,
-            "write" | "edit" | "multiedit" | "memory" => self.write,
+            "write" | "edit" | "multiedit" | "hashedit" | "memory" => self.write,
             "webfetch" | "websearch" => self.web,
             _ => self.other,
         }

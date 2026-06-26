@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Maki ships with 17 built-in tools. This is the full reference.
+Maki ships with 18 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -61,6 +61,15 @@ Prefer this over edit when making multiple changes to the same file.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `edits` | array | yes | Array of edit operations to apply sequentially |
+| `path` | string | yes | Absolute path to the file |
+
+### `hashedit` *(lua plugin)*
+
+Edit a file by line number, verified against a short content hash.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `edits` | array | yes | Hash-anchored edit operations applied from bottom to top |
 | `path` | string | yes | Absolute path to the file |
 
 ### `glob` *(lua plugin)*

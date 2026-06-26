@@ -1,6 +1,7 @@
 local shorten_path = require("maki.shorten_path")
 local ToolView = require("maki.tool_view")
 local fuzzy_replace = require("maki.fuzzy_replace")
+local hashline = require("maki.hashline")
 
 local EDIT_DESCRIPTION = [[Replace an exact string match in a file.
 
@@ -20,6 +21,19 @@ Prefer this over edit when making multiple changes to the same file.
 - Edits are applied in sequence - each operates on the result of the previous.
 - If any edit fails, none are written.
 - Ensure earlier edits don't affect text that later edits need to find.
+]]
+
+local HASHEDIT_DESCRIPTION = [[Edit a file by line number, verified against a short content hash.
+
+- Read (or grep) the file first: every line comes back tagged `NR:HASH|content`.
+- Each edit pins a line by number, paired with the line's HASH for verification.
+- If the file changed since you read it, the hash won't match and the edit is rejected before any change is made — re-read.
+- Each edit is one of:
+  - replace a line: set linenumber + hash + new_string.
+  - delete a line: set linenumber + hash (omit or empty new_string).
+  - insert after a line: set linenumber + hash + new_string + insert=true.
+- linenumber is "N" for a single line, or "N-M" to search an inclusive range; the hash must match the one line to edit, and only that line is affected.
+- Edits apply bottom-to-top and must not overlap. If any edit fails, none are written.
 ]]
 
 local function edit_header(input)
@@ -195,5 +209,76 @@ maki.api.register_tool({
     local n = #edits
     local s = n == 1 and "" or "s"
     return diff_result(result, string.format("applied %d edit%s to %s", n, s, shorten_path(result.path)))
+  end,
+})
+
+maki.api.register_tool({
+  name = "hashedit",
+  kind = "edit",
+  mutable_path = "path",
+  permission_scope = "path",
+  start_annotation = "edits",
+  audiences = { "main", "general_sub", "interpreter" },
+  description = HASHEDIT_DESCRIPTION,
+
+  schema = {
+    type = "object",
+    properties = {
+      path = {
+        type = "string",
+        description = "Absolute path to the file",
+        required = true,
+        alias = "file_path",
+      },
+      edits = {
+        type = "array",
+        description = "Hash-anchored edit operations applied from bottom to top",
+        required = true,
+        items = {
+          type = "object",
+          properties = {
+            linenumber = {
+              type = "string",
+              description = 'Line to edit: "N" for a single line, or "N-M" to search an inclusive range (1-indexed); only the matched line is affected',
+              required = true,
+            },
+            hash = {
+              type = "string",
+              description = "Short content hash of the line to edit, from read/grep/index output",
+              required = true,
+            },
+            new_string = {
+              type = "string",
+              description = "Replacement text (multi-line ok). Omit or empty to delete.",
+            },
+            insert = {
+              type = "boolean",
+              description = "Insert new_string after the matched line instead of replacing it (default false)",
+            },
+          },
+        },
+      },
+    },
+  },
+
+  header = edit_header,
+  restore = edit_restore,
+
+  handler = function(input, ctx)
+    local edits = input.edits
+    if not edits or #edits == 0 then
+      return { llm_output = "provide at least one edit", is_error = true }
+    end
+
+    local result, err = apply_edit(input.path, ctx, function(content)
+      return hashline.apply_edits(content, edits)
+    end)
+    if not result then
+      return { llm_output = err, is_error = true }
+    end
+
+    local n = #edits
+    local s = n == 1 and "" or "s"
+    return diff_result(result, string.format("applied %d hash edit%s to %s", n, s, shorten_path(result.path)))
   end,
 })

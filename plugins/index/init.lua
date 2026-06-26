@@ -1,16 +1,21 @@
 local indexer = require("indexer")
 local ToolView = require("maki.tool_view")
 local shorten_path = require("maki.shorten_path")
+local hashline = require("maki.hashline")
 
 local TRUNCATED_SUFFIX = indexer.TRUNCATED_SUFFIX
 local TRUNCATED_INFIX = " more truncated]"
 
 local function split_trailing_range(line)
+  local body, inner, hash = line:match("^(.*) %[(%d[%d%-,]*)%] +([0-9a-z]+)$")
+  if body then
+    return body, "[" .. inner .. "]", hash
+  end
   local pos = line:find(" %[%d[%d%-,]*%]$")
   if not pos then
-    return nil, nil
+    return nil, nil, nil
   end
-  return line:sub(1, pos - 1), line:sub(pos + 1)
+  return line:sub(1, pos - 1), line:sub(pos + 1), nil
 end
 
 local function is_section_header(line)
@@ -30,9 +35,9 @@ local function infer_line_meta(line)
     return nil
   end
   if is_section_header(line) then
-    local body, range = split_trailing_range(line)
+    local body, range, hash = split_trailing_range(line)
     if range then
-      return { tag = "section", body = body .. " ", range = range }
+      return { tag = "section", body = body .. " ", range = range, hash = hash }
     end
     return { tag = "section" }
   end
@@ -42,9 +47,9 @@ local function infer_line_meta(line)
   then
     return { tag = "dim" }
   end
-  local body, range = split_trailing_range(line)
+  local body, range, hash = split_trailing_range(line)
   if range then
-    return { body = body, range = range }
+    return { body = body, range = range, hash = hash }
   end
   return nil
 end
@@ -60,15 +65,23 @@ local function render_skeleton(view, text, meta)
       view:append("")
     elseif m and m.tag == "section" then
       if m.range then
-        view:append({ { m.body, "section" }, { m.range, "line_nr" } })
+        local spans = { { m.body, "section" }, { m.range, "line_nr" } }
+        if m.hash then
+          spans[#spans + 1] = { " " .. m.hash, "line_nr" }
+        end
+        view:append(spans)
       else
         view:append({ { line, "section" } })
       end
     elseif m and m.tag == "dim" then
       view:append({ { line, "dim" } })
     elseif m and m.range then
-      view:append({ { m.body }, { " " }, { m.range, "line_nr" } })
-      hl_entries[#hl_entries + 1] = { idx = #view.all_lines, text = m.body, range = m.range }
+      local spans = { { m.body }, { " " }, { m.range, "line_nr" } }
+      if m.hash then
+        spans[#spans + 1] = { " " .. m.hash, "line_nr" }
+      end
+      view:append(spans)
+      hl_entries[#hl_entries + 1] = { idx = #view.all_lines, text = m.body, range = m.range, hash = m.hash }
     else
       view:append({ { line } })
       hl_entries[#hl_entries + 1] = { idx = #view.all_lines, text = line }
@@ -99,11 +112,34 @@ local function apply_highlights(view, hl_entries, ext)
       if e.range then
         new_line[#new_line + 1] = { " " }
         new_line[#new_line + 1] = { e.range, "line_nr" }
+        if e.hash then
+          new_line[#new_line + 1] = { " " .. e.hash, "line_nr" }
+        end
       end
       view:update_line(e.idx, new_line)
     end
   end
   view:flush()
+end
+
+local function append_hashes(skeleton, source, line_meta)
+  local source_lines = hashline.split_lines(source)
+  local lines = {}
+  local line_nr = 0
+  for line in (skeleton:gsub("\n+$", "") .. "\n"):gmatch("([^\n]*)\n") do
+    line_nr = line_nr + 1
+    local m = (line_meta and line_meta[line_nr]) or infer_line_meta(line)
+    if m and m.range then
+      local first = tonumber(m.range:match("(%d+)"))
+      if first and source_lines[first] then
+        local h = hashline.hash(source_lines[first])
+        line = line .. " " .. h
+        m.hash = h
+      end
+    end
+    lines[#lines + 1] = line
+  end
+  return table.concat(lines, "\n")
 end
 
 local function render_header(path, line_count)
@@ -156,6 +192,7 @@ maki.api.register_tool({
 Return a compact overview of a source file: imports, type definitions, function signatures, and structure with their line numbers surrounded by []. ~70-90% more efficient than reading the full file.
 
 - Use this FIRST to understand file structure before using read with offset/limit.
+- Each ranged line includes a content hash (first line of the range). Use it with the hashedit tool to edit without retyping old content.
 - Supports source files in different programming languages and markdown.
 - Falls back with an error on unsupported languages. Use read instead.]],
 
@@ -222,10 +259,11 @@ Return a compact overview of a source file: imports, type definitions, function 
       return "error: " .. tostring(line_meta)
     end
 
+    local hashed = append_hashes(skeleton, source, line_meta)
     local ext = indexer.LANG_TO_EXT[lang] or path:match("%.([^%.]+)$") or ""
-    local buf, header = render_index(skeleton, path, ctx, ext, line_meta)
+    local buf, header = render_index(hashed, path, ctx, ext, line_meta)
     return {
-      llm_output = skeleton:gsub("\n+$", ""),
+      llm_output = hashed:gsub("\n+$", ""),
       body = buf,
       header = header,
     }

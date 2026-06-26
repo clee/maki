@@ -2,6 +2,7 @@ local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local shorten_path = require("maki.shorten_path")
 local color = require("maki.color")
+local hashline = require("maki.hashline")
 
 local NO_MATCHES = "No files found"
 local MAX_PER_CALL_LIMIT = 1000
@@ -30,7 +31,8 @@ local function format_llm_output(entries)
       end
       for _, line in ipairs(group.lines) do
         local sep = line.is_match and ":" or " "
-        parts[#parts + 1] = string.format("  %d%s %s", line.line_nr, sep, line.text)
+        local h = hashline.hash(line.text)
+        parts[#parts + 1] = string.format("  %d%s%s|%s", line.line_nr, sep, h, line.text)
       end
     end
   end
@@ -160,10 +162,7 @@ local function parse_llm_output(text)
       if line == "  --" then
         current.groups[#current.groups + 1] = { lines = {} }
       else
-        local nr, sep, content = line:match("^%s+(%d+)([:]) (.*)$")
-        if not nr then
-          nr, sep, content = line:match("^%s+(%d+)( ) (.*)$")
-        end
+        local nr, sep, hash, content = line:match("^%s+(%d+)([: ])([0-9a-z]+)|(.*)$")
         if nr then
           local group = current.groups[#current.groups]
           group.lines[#group.lines + 1] = {
@@ -171,6 +170,19 @@ local function parse_llm_output(text)
             text = content or "",
             is_match = sep == ":",
           }
+        else
+          nr, sep, content = line:match("^%s+(%d+)([:]) (.*)$")
+          if not nr then
+            nr, sep, content = line:match("^%s+(%d+)( ) (.*)$")
+          end
+          if nr then
+            local group = current.groups[#current.groups]
+            group.lines[#group.lines + 1] = {
+              line_nr = tonumber(nr),
+              text = content or "",
+              is_match = sep == ":",
+            }
+          end
         end
       end
     end
@@ -190,6 +202,7 @@ maki.api.register_tool({
 
 - Respects .gitignore.
 - Results grouped by file, sorted by modification time.
+- Each line is tagged `NR:HASH|content` (matches) or `NR HASH|content` (context). Use the HASH with the hashedit tool to edit without retyping old content.
 - Prefer speculative parallel searches over sequential rounds of glob+grep.
 - Do NOT wrap the pattern in quotes. Do NOT double-escape (e.g. `\[` not `\\[`).
 - Multi-line matching is auto-enabled when the pattern contains `\n`, `(?s)`, or `(?m)`.]],

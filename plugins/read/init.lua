@@ -1,8 +1,10 @@
 local ToolView = require("maki.tool_view")
 local shorten_path = require("maki.shorten_path")
+local hashline = require("maki.hashline")
 
 local DESCRIPTION = [[Read a file or directory. Returns contents with line numbers (1-indexed).
 
+- Each line is tagged `NR:HASH|content` (HASH is a short content hash). Use these hashes with the hashedit tool to edit without retyping old content.
 - Supports absolute, relative, and ~/ paths.
 - **Always include offset and limit** if possible. Defaults: no offset = start at 1; no limit = up to 2000 lines.
 - Use the **index** tool or **grep** tool first to find the offset and limit.
@@ -145,7 +147,9 @@ local function read_file(path, offset, limit, ctx)
 
   local parts = {}
   for i, line in ipairs(lines) do
-    parts[#parts + 1] = (start + i - 1) .. ": " .. line
+    local nr = start + i - 1
+    local h = hashline.hash(all_lines[start + i - 1])
+    parts[#parts + 1] = nr .. ":" .. h .. "|" .. line
   end
   local llm_output = table.concat(parts, "\n")
 
@@ -274,14 +278,20 @@ maki.api.register_tool({
   restore = function(input, output, _is_error, ctx)
     local lines, start_line, total_lines = {}, nil, nil
     for raw in (output .. "\n"):gmatch("([^\n]*)\n") do
-      local nr, text = raw:match("^%s*(%d+): (.*)$")
+      local nr, hash, text = raw:match("^%s*(%d+):([0-9a-z]+)|(.*)$")
       if nr then
         start_line = start_line or tonumber(nr)
         lines[#lines + 1] = text
       else
-        local trunc_end = raw:match("Truncated lines: %d+%-(%d+)")
-        if trunc_end then
-          total_lines = tonumber(trunc_end)
+        local old_nr, old_text = raw:match("^%s*(%d+): (.*)$")
+        if old_nr then
+          start_line = start_line or tonumber(old_nr)
+          lines[#lines + 1] = old_text
+        else
+          local trunc_end = raw:match("Truncated lines: %d+%-(%d+)")
+          if trunc_end then
+            total_lines = tonumber(trunc_end)
+          end
         end
       end
     end

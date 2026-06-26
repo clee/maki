@@ -175,6 +175,76 @@ case("replace_all_fuzzy_whitespace", function()
   eq(result, "let x = 2;\nlet x = 2;")
 end)
 
+-- hashedit (line-number + hash) unit tests
+
+local hashline = require("maki.hashline")
+
+case("hashedit_replace_single_line", function()
+  local content = "fn foo() {}\nfn bar() {}\nfn baz() {}"
+  local h_bar = hashline.hash("fn bar() {}")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2", hash = h_bar, new_string = "fn bar() { return 1 }" },
+  })
+  eq(err, nil)
+  eq(result, "fn foo() {}\nfn bar() { return 1 }\nfn baz() {}")
+end)
+
+case("hashedit_range_replaces_only_matched_line", function()
+  local content = "a\nb\nc\nd"
+  local h_c = hashline.hash("c")
+  local h_a = hashline.hash("a")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "3-4", hash = h_c, new_string = "z" },
+    { linenumber = "1", hash = h_a, new_string = "aa", insert = true },
+  })
+  eq(err, nil)
+  eq(result, "a\naa\nb\nz\nd")
+end)
+
+case("hashedit_stale_hash_rejected", function()
+  local result, err = hashline.apply_edits("a\nb", { { linenumber = "1", hash = "zzz", new_string = "x" } })
+  eq(result, nil)
+  has(err, "not match")
+  has(err, "re-read")
+end)
+
+case("hashedit_hash_not_in_range_rejected", function()
+  local content = "a\nb\nc\nd"
+  local h_a = hashline.hash("a")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "3-4", hash = h_a, new_string = "x" },
+  })
+  eq(result, nil)
+  has(err, "range")
+  has(err, "re-read")
+end)
+
+case("hashedit_out_of_range_rejected", function()
+  local content = "a\nb"
+  local h_a = hashline.hash("a")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "1-9", hash = h_a, new_string = "x" },
+  })
+  eq(result, nil)
+  has(err, "out of range")
+end)
+
+case("hashedit_bad_linenumber_rejected", function()
+  local result, err = hashline.apply_edits("a\nb", { { linenumber = "x", hash = "zzz", new_string = "y" } })
+  eq(result, nil)
+  has(err, "must be")
+end)
+
+case("hashedit_delete_single_line", function()
+  local content = "a\nb\nc"
+  local h_b = hashline.hash("b")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2", hash = h_b },
+  })
+  eq(err, nil)
+  eq(result, "a\nc")
+end)
+
 case("replace_all_multiline_repeated_block", function()
   local content = "fn f() {\n    a();\n}\nfn f() {\n    a();\n}"
   local result = fr.replace(content, "fn f() {\n    a();\n}", "fn g() {}", true)
