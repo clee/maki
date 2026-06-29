@@ -17,6 +17,7 @@ use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 use super::ResolvedAuth;
 use super::anthropic::Anthropic;
+use super::aperture::Aperture;
 use super::copilot::Copilot;
 use super::deepseek::DeepSeek;
 use super::google::Google;
@@ -394,6 +395,10 @@ pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>
             TensorX::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
+        ProviderKind::Aperture => Box::new(
+            Aperture::with_auth(auth.clone(), timeouts)
+                .with_system_prefix(meta.system_prefix.clone()),
+        ),
     };
 
     Ok(Box::new(DynamicProvider {
@@ -448,6 +453,7 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
         tier: script_model.tier,
         family: meta.base.family(),
         supports_tool_examples_override: script_model.supports_tool_examples,
+        supports_thinking_override: None,
         pricing: script_model.pricing.clone().unwrap_or_default(),
         max_output_tokens: script_model.max_output_tokens,
         context_window: script_model.context_window,
@@ -464,6 +470,7 @@ pub fn find_model_for_tier(slug: &str, tier: ModelTier) -> Option<Model> {
         tier,
         family: meta.base.family(),
         supports_tool_examples_override: script_model.supports_tool_examples,
+        supports_thinking_override: None,
         pricing: script_model.pricing.clone().unwrap_or_default(),
         max_output_tokens: script_model.max_output_tokens,
         context_window: script_model.context_window,

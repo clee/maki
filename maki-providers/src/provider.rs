@@ -10,6 +10,7 @@ use crate::model::{Model, ModelFamily, ModelInfo, models_for_provider};
 use crate::providers::Timeouts;
 use crate::providers::anthropic::Anthropic;
 use crate::providers::anthropic::bedrock;
+use crate::providers::aperture::Aperture;
 use crate::providers::copilot::Copilot;
 use crate::providers::deepseek::DeepSeek;
 use crate::providers::dynamic;
@@ -42,6 +43,7 @@ pub enum ProviderKind {
     Synthetic,
     #[strum(serialize = "tensorx")]
     TensorX,
+    Aperture,
 }
 
 impl ProviderKind {
@@ -59,6 +61,7 @@ impl ProviderKind {
             Self::OpenRouter => "OpenRouter",
             Self::Synthetic => "Synthetic",
             Self::TensorX => "TensorX",
+            Self::Aperture => "Aperture",
         }
     }
 
@@ -76,6 +79,7 @@ impl ProviderKind {
             Self::OpenRouter => "OPENROUTER_API_KEY",
             Self::Synthetic => "SYNTHETIC_API_KEY",
             Self::TensorX => "TENSORX_API_KEY",
+            Self::Aperture => "APERTURE_BASE_URL",
         }
     }
 
@@ -95,6 +99,7 @@ impl ProviderKind {
             Self::OpenRouter => "https://openrouter.ai/api/v1",
             Self::Synthetic => "https://api.synthetic.new/openai/v1",
             Self::TensorX => "https://api.tensorx.ai/v1",
+            Self::Aperture => "Aperture gateway (set APERTURE_BASE_URL)",
         }
     }
 
@@ -134,6 +139,9 @@ impl ProviderKind {
             Self::OpenRouter => {
                 Some("300+ models from all providers, prompt caching, provider routing")
             }
+            Self::Aperture => {
+                Some("Tailscale Aperture LLM gateway; models discovered from the gateway")
+            }
             _ => None,
         }
     }
@@ -152,6 +160,7 @@ impl ProviderKind {
             Self::OpenRouter => ModelFamily::Generic,
             Self::Synthetic => ModelFamily::Synthetic,
             Self::TensorX => ModelFamily::Generic,
+            Self::Aperture => ModelFamily::Generic,
         }
     }
 
@@ -164,6 +173,7 @@ impl ProviderKind {
                 | Self::Copilot
                 | Self::OpenRouter
                 | Self::TensorX
+                | Self::Aperture
                 | Self::Mistral
         )
     }
@@ -183,6 +193,7 @@ impl ProviderKind {
             Self::Synthetic => 32_000,
             // FIXME: See comment in tensorx.rs
             Self::TensorX => 0,
+            Self::Aperture => 16_384,
         }
     }
 
@@ -200,6 +211,7 @@ impl ProviderKind {
             Self::OpenRouter => 200_000,
             Self::Synthetic => 128_000,
             Self::TensorX => 200_000,
+            Self::Aperture => 128_000,
         }
     }
 
@@ -223,6 +235,7 @@ impl ProviderKind {
             Self::OpenRouter => Ok(Box::new(OpenRouter::new(timeouts)?)),
             Self::Synthetic => Ok(Box::new(Synthetic::new(timeouts)?)),
             Self::TensorX => Ok(Box::new(TensorX::new(timeouts)?)),
+            Self::Aperture => Ok(Box::new(Aperture::new(timeouts)?)),
         }
     }
 

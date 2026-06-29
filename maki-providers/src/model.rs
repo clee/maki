@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::provider::ProviderKind;
 use crate::providers::{
-    anthropic, copilot, deepseek, dynamic, google, llama_cpp, mistral, ollama, openai, openrouter,
-    synthetic, tensorx, zai,
+    anthropic, aperture, copilot, deepseek, dynamic, google, llama_cpp, mistral, ollama, openai,
+    openrouter, synthetic, tensorx, zai,
 };
 
 const PER_MILLION: f64 = 1_000_000.0;
@@ -158,7 +158,7 @@ pub struct ModelEntry {
     pub context_window: u32,
 }
 
-fn lookup_entry<'a>(
+pub(crate) fn lookup_entry<'a>(
     entries: &'a [ModelEntry],
     model_id: &str,
 ) -> Result<&'a ModelEntry, ModelError> {
@@ -185,6 +185,7 @@ pub fn models_for_provider(provider: ProviderKind) -> &'static [ModelEntry] {
         ProviderKind::TensorX => tensorx::models(),
         ProviderKind::DeepSeek => deepseek::models(),
         ProviderKind::OpenRouter => openrouter::models(),
+        ProviderKind::Aperture => aperture::models(),
     }
 }
 
@@ -205,6 +206,10 @@ pub struct Model {
     pub tier: ModelTier,
     pub family: ModelFamily,
     pub supports_tool_examples_override: Option<bool>,
+    /// Resolved thinking support, used by gateway providers (e.g. Aperture) that
+    /// stream through a native provider chosen at runtime. `None` falls back to
+    /// the provider's own capability.
+    pub supports_thinking_override: Option<bool>,
     pub pricing: ModelPricing,
     pub max_output_tokens: u32,
     pub context_window: u32,
@@ -254,6 +259,7 @@ impl Model {
             tier,
             family,
             supports_tool_examples_override: None,
+            supports_thinking_override: None,
             pricing,
             max_output_tokens,
             context_window,
@@ -263,6 +269,11 @@ impl Model {
     pub fn supports_tool_examples(&self) -> bool {
         self.supports_tool_examples_override
             .unwrap_or_else(|| self.family.supports_tool_examples())
+    }
+
+    pub fn supports_thinking(&self) -> bool {
+        self.supports_thinking_override
+            .unwrap_or_else(|| self.provider.supports_thinking())
     }
 
     /// A model supports fast mode exactly when it carries fast-tier pricing, so
@@ -611,6 +622,40 @@ mod tests {
         assert_eq!(
             (p.input, p.output, p.cache_write, p.cache_read),
             (0.0, 0.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn aperture_glm_5_2_end_to_end_pricing_survives_from_spec() {
+        // Aperture has no static table; pricing must come from the discovered
+        // registry (populated by parse_models from the gateway's /v1/models).
+        // Reproduces the registry state for the real glm-5.2 entry, then resolves
+        // via from_spec exactly as spawn_model_fetch's done closure does.
+        let parsed = vec![ModelInfo {
+            id: "zai/glm-5.2".to_string(),
+            context_window: None,
+            max_output_tokens: None,
+            pricing: Some(ModelPricing {
+                input: 0.95,
+                output: 3.0,
+                cache_read: 0.18,
+                cache_write: 0.0,
+                fast: None,
+            }),
+        }];
+        crate::model_registry::model_registry()
+            .write()
+            .unwrap()
+            .set_known_models(ProviderKind::Aperture, parsed);
+
+        let model = Model::from_spec("aperture/zai/glm-5.2").expect("spec resolves");
+        assert!(
+            (model.pricing.input - 0.95).abs() < 1e-9,
+            "input pricing lost"
+        );
+        assert!(
+            (model.pricing.output - 3.0).abs() < 1e-9,
+            "output pricing lost"
         );
     }
 

@@ -1175,7 +1175,7 @@ impl App {
                 vec![]
             }
             "/thinking" => {
-                if !self.state.model.provider.supports_thinking() {
+                if !self.state.model.supports_thinking() {
                     self.flash("Thinking requires a provider that supports it".into());
                     return vec![];
                 }
