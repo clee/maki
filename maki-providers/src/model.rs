@@ -206,6 +206,9 @@ pub struct Model {
     pub tier: ModelTier,
     pub family: ModelFamily,
     pub supports_tool_examples_override: Option<bool>,
+    /// Resolved thinking support, used by gateway providers (e.g. Aperture) that
+    /// stream through a native provider chosen at runtime. `None` falls back to
+    /// the provider's own capability.
     pub supports_thinking_override: Option<bool>,
     pub supports_vision_override: Option<bool>,
     pub pricing: ModelPricing,

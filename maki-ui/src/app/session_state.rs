@@ -6,7 +6,8 @@ use arc_swap::ArcSwap;
 use maki_agent::ToolOutput;
 use maki_agent::permissions::PermissionManager;
 use maki_config::Effect;
-use maki_providers::{Message, Model, ThinkingConfig, TokenUsage};
+use maki_providers::provider::from_model;
+use maki_providers::{Message, Model, ThinkingConfig, Timeouts, TokenUsage};
 use maki_storage::StateDir;
 use maki_storage::sessions::{StoredEffect, StoredMode, StoredRule};
 
@@ -35,10 +36,14 @@ impl SessionState {
         fallback_model: &Model,
         storage: &StateDir,
     ) -> Self {
-        let model = Model::from_spec(&session.model).unwrap_or_else(|_| {
+        let mut model = Model::from_spec(&session.model).unwrap_or_else(|_| {
             session.model = fallback_model.spec();
             fallback_model.clone()
         });
+        // Apply the provider's per-model adjustments (e.g. ZAI's glm-5.2
+        // thinking support, or Aperture's routed-provider inheritance) so a
+        // resumed session matches one started fresh.
+        let _ = from_model(&mut model, Timeouts::default());
 
         let mode = match session.meta.mode {
             Some(StoredMode::Plan) => Mode::Plan,
@@ -211,6 +216,7 @@ pub(crate) fn stored_to_rules(stored: &[StoredRule]) -> Vec<maki_config::Permiss
 mod tests {
     use super::*;
     use crate::components::test_model;
+    use maki_storage::sessions::StoredThinking;
 
     fn make_plan_session(mode: Option<StoredMode>, plan_path: Option<String>) -> AppSession {
         let mut session = AppSession::new("test-model", "/tmp");
@@ -262,9 +268,29 @@ mod tests {
     fn build_mode_does_not_allocate_path() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = StateDir::from_path(tmp.path().to_path_buf());
-        let session = make_plan_session(Some(StoredMode::Build), None);
+        let session = make_plan_session(None, None);
         let state = SessionState::from_session(session, &test_model(), &storage);
         assert_eq!(state.mode, Mode::Build);
         assert!(state.plan.path().is_none());
+    }
+
+    #[test]
+    fn from_session_applies_provider_adjust_model() {
+        // SAFETY: this test runs single-threaded; no other thread reads the env.
+        unsafe { std::env::set_var("APERTURE_HOST", "https://example.com") };
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session = AppSession::new("aperture/zai/glm-5.2", "/tmp");
+        session.meta.thinking = Some(StoredThinking::Adaptive);
+        let state = SessionState::from_session(session, &test_model(), &storage);
+        assert!(
+            state.model.supports_thinking(),
+            "resumed aperture/zai/glm-5.2 should inherit thinking support from adjust_model",
+        );
+        assert_eq!(
+            state.thinking,
+            ThinkingConfig::Adaptive,
+            "resumed thinking config should be preserved when the model supports it",
+        );
     }
 }

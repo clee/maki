@@ -14,6 +14,7 @@ use crate::model::{Model, ModelFamily, ModelInfo};
 use crate::providers::Timeouts;
 use crate::providers::anthropic::Anthropic;
 use crate::providers::anthropic::bedrock;
+use crate::providers::aperture::Aperture;
 use crate::providers::copilot::Copilot;
 use crate::providers::deepseek::DeepSeek;
 use crate::providers::dynamic;
@@ -49,6 +50,7 @@ pub enum ProviderKind {
     TensorX,
     #[strum(serialize = "opencode")]
     Opencode,
+    Aperture,
 }
 
 impl ProviderKind {
@@ -67,6 +69,7 @@ impl ProviderKind {
             Self::Synthetic => "Synthetic",
             Self::TensorX => "TensorX",
             Self::Opencode => "Opencode",
+            Self::Aperture => "Aperture",
         }
     }
 
@@ -85,6 +88,7 @@ impl ProviderKind {
             Self::Synthetic => "SYNTHETIC_API_KEY",
             Self::TensorX => "TENSORX_API_KEY",
             Self::Opencode => "OPENCODE_API_KEY",
+            Self::Aperture => "",
         }
     }
 
@@ -105,6 +109,7 @@ impl ProviderKind {
             Self::Synthetic => "https://api.synthetic.new/openai/v1",
             Self::TensorX => "https://api.tensorx.ai/v1",
             Self::Opencode => "https://opencode.ai/zen/v1",
+            Self::Aperture => "Aperture gateway (set APERTURE_HOST)",
         }
     }
 
@@ -132,6 +137,9 @@ impl ProviderKind {
             Self::Opencode => Some(
                 "Dynamically discovered models via [models.dev](https://models.dev/) + all the models provided by Opencode Zen API",
             ),
+            Self::Aperture => Some(
+                "Tailscale Aperture LLM gateway; set APERTURE_HOST or configure in providers.toml",
+            ),
             _ => None,
         }
     }
@@ -151,7 +159,23 @@ impl ProviderKind {
             Self::Synthetic => ModelFamily::Synthetic,
             Self::TensorX => ModelFamily::Generic,
             Self::Opencode => ModelFamily::Generic,
+            Self::Aperture => ModelFamily::Generic,
         }
+    }
+
+    pub const fn accepts_arbitrary_models(self) -> bool {
+        matches!(
+            self,
+            Self::Ollama
+                | Self::LlamaCpp
+                | Self::Google
+                | Self::Copilot
+                | Self::OpenRouter
+                | Self::TensorX
+                | Self::Aperture
+                | Self::Mistral
+                | Self::Opencode
+        )
     }
 
     /// `None` when we honestly don't know the output window: llama.cpp
@@ -174,6 +198,7 @@ impl ProviderKind {
             Self::Synthetic => Some(32_000),
             Self::TensorX => None,
             Self::Opencode => Some(128_000),
+            Self::Aperture => Some(16_384),
         }
     }
 
@@ -192,6 +217,7 @@ impl ProviderKind {
             Self::Synthetic => 128_000,
             Self::TensorX => 200_000,
             Self::Opencode => 256_000,
+            Self::Aperture => 128_000,
         }
     }
 
@@ -216,6 +242,7 @@ impl ProviderKind {
             Self::Synthetic => Ok(Box::new(Synthetic::new(timeouts)?)),
             Self::TensorX => Ok(Box::new(TensorX::new(timeouts)?)),
             Self::Opencode => Ok(Box::new(Opencode::new(timeouts)?)),
+            Self::Aperture => Ok(Box::new(Aperture::new(timeouts)?)),
         }
     }
 }

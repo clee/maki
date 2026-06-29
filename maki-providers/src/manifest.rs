@@ -1,7 +1,7 @@
 use crate::model::{ModelEntry, ModelFamily, ModelTier};
 use crate::providers::{
-    anthropic, copilot, custom, deepseek, dynamic, google, llama_cpp, mistral, ollama, openai,
-    openrouter, synthetic, tensorx, zai,
+    anthropic, aperture, copilot, custom, deepseek, dynamic, google, llama_cpp, mistral, ollama,
+    openai, openrouter, synthetic, tensorx, zai,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -159,9 +159,20 @@ const OPENCODE: ProviderManifest = ProviderManifest {
     models: &[],
 };
 
+const APERTURE: ProviderManifest = ProviderManifest {
+    slug: "aperture",
+    display_name: "Aperture",
+    family: ModelFamily::Generic,
+    supports_thinking: false,
+    accepts_arbitrary_models: true,
+    fallback_max_output: Some(16_384),
+    fallback_context_window: 128_000,
+    models: aperture::models(),
+};
+
 const BUILTINS: &[ProviderManifest] = &[
     ANTHROPIC, OPENAI, GOOGLE, COPILOT, OLLAMA, LLAMA_CPP, MISTRAL, ZAI, DEEPSEEK, OPENROUTER,
-    SYNTHETIC, TENSORX, OPENCODE,
+    SYNTHETIC, TENSORX, OPENCODE, APERTURE,
 ];
 
 pub struct ManifestRegistry;

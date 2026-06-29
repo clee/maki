@@ -140,6 +140,8 @@ fn format_auth(kind: ProviderKind) -> String {
     let env = kind.api_key_env();
     if kind == ProviderKind::Ollama {
         format!("`OLLAMA_HOST` for local/remote (e.g. `http://localhost:11434`), `{env}` for auth")
+    } else if kind == ProviderKind::Aperture {
+        "`APERTURE_HOST` (e.g. `https://your-host.tailnet.ts.net`)".into()
     } else {
         format!("`{env}`")
     }
@@ -281,6 +283,10 @@ fn no_catalog_note(kind: ProviderKind) -> &'static str {
         ProviderKind::LlamaCpp => {
             "Connects to any OpenAI-compatible `/v1` endpoint. Point `LLAMA_CPP_HOST` \
              to your server address (defaults to `http://localhost:8080`)."
+        }
+        ProviderKind::Aperture => {
+            "Aperture discovers models from your gateway. Set `APERTURE_HOST` to your Tailscale Aperture \
+             endpoint (e.g. `https://your-host.tailnet.ts.net`). No API key needed — Tailscale handles auth."
         }
         ProviderKind::OpenRouter => {
             "OpenRouter aggregates models from many providers behind a single API key. \
