@@ -1,4 +1,5 @@
 local h = require("memory_helpers")
+local hashline = require("maki.hashline")
 
 local fnv1a_64 = h.fnv1a_64
 local count_lines = h.count_lines
@@ -167,6 +168,53 @@ case("write_read_delete_lifecycle", function()
 
   maki.fs.rm(file_path)
   assert(not maki.fs.metadata(file_path), "file should be deleted")
+  rmtree(tmpdir)
+end)
+
+case("memory_edit_roundtrip_replace_insert_delete", function()
+  local tmpdir = mktmpdir()
+  local file_path = safe_resolve(tmpdir, "arch.md")
+  maki.fs.write(file_path, "# Title\nold line\nmore")
+
+  -- simulate what `view` exposes: hash of a known line's content
+  local h_old = hashline.hash("old line")
+  local h_more = hashline.hash("more")
+  local h_title = hashline.hash("# Title")
+
+  local function apply(edits)
+    return hashline.apply_edits(maki.fs.read(file_path), edits)
+  end
+
+  -- replace single line
+  local after, err = apply({ { linenumber = "2", hash = h_old, new_string = "new line" } })
+  eq(err, nil)
+  maki.fs.write(file_path, after)
+  eq(maki.fs.read(file_path), "# Title\nnew line\nmore")
+
+  -- insert after line 1
+  after, err = apply({ { linenumber = "1", hash = h_title, new_string = "intro", insert = true } })
+  eq(err, nil)
+  maki.fs.write(file_path, after)
+  eq(maki.fs.read(file_path), "# Title\nintro\nnew line\nmore")
+
+  -- delete the last line (now line 4)
+  after, err = apply({ { linenumber = "4", hash = h_more } })
+  eq(err, nil)
+  maki.fs.write(file_path, after)
+  eq(maki.fs.read(file_path), "# Title\nintro\nnew line")
+  rmtree(tmpdir)
+end)
+
+case("memory_edit_stale_hash_rejected_before_write", function()
+  local tmpdir = mktmpdir()
+  local file_path = safe_resolve(tmpdir, "arch.md")
+  maki.fs.write(file_path, "a\nb\nc")
+  local before = maki.fs.read(file_path)
+  local after, err = hashline.apply_edits(before, { { linenumber = "1", hash = "zzz", new_string = "x" } })
+  eq(after, nil)
+  assert(err and err:find("not match"), "stale hash should be rejected: " .. tostring(err))
+  -- file untouched
+  eq(maki.fs.read(file_path), "a\nb\nc")
   rmtree(tmpdir)
 end)
 

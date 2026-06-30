@@ -151,8 +151,9 @@ Persistent, project-scoped scratchpad for learnings, patterns, decisions, and go
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `command` | string | yes | Command: view, write, delete |
+| `command` | string | yes | Command: view, write, edit, delete |
 | `content` | string | no | File content for 'write' |
+| `edits` | array | no | Hash-anchored edits for 'edit' (applied bottom-to-top, must not overlap) |
 | `path` | string | no | Relative path (e.g. 'architecture.md'). Omit to list all. |
 
 ### `skill` *(lua plugin)*

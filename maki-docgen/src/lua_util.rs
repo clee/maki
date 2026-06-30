@@ -222,7 +222,14 @@ fn parse_single_tool(source: &str) -> Option<Value> {
 
         let ptype = extract_lua_field(block, "type").unwrap_or_default();
         let pdesc = extract_lua_field(block, "description").unwrap_or_default();
-        if block.contains("required = true")
+        // Only a property's own `required = true` (before any nested `items`/
+        // `properties` sub-block) marks it required; nested fields don't.
+        let direct_region = block
+            .find("items = {")
+            .or_else(|| block.find("properties = {"))
+            .map(|i| &block[..i])
+            .unwrap_or(block);
+        if direct_region.contains("required = true")
             && !required.contains(&Value::String(pname.to_string()))
         {
             required.push(Value::String(pname.to_string()));

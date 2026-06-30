@@ -1,5 +1,6 @@
 local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
+local hashline = require("maki.hashline")
 
 local failures = {}
 
@@ -13,6 +14,12 @@ end
 local function eq(actual, expected, msg)
   if actual ~= expected then
     error((msg or "") .. "\nexpected: " .. tostring(expected) .. "\n  actual: " .. tostring(actual))
+  end
+end
+
+local function has(s, substr, msg)
+  if not s:find(substr, 1, true) then
+    error((msg or "") .. "\nexpected to contain: " .. tostring(substr) .. "\n  actual: " .. tostring(s))
   end
 end
 
@@ -1180,6 +1187,131 @@ case("filter_items_table_items_uses_label", function()
   eq(filtered[2].label, "Foobar")
   eq(indices[1], 1)
   eq(indices[2], 3)
+end)
+
+-- hashline (line-number + hash) unit tests
+
+case("hashline_hash_is_short_lowercase_base36", function()
+  local h = hashline.hash("some line content")
+  eq(#h, hashline.HASH_LEN)
+  assert(h:match("^[0-9a-z]+$"), "hash should be base36: " .. tostring(h))
+end)
+
+case("hashline_parse_linenumber_single_and_range", function()
+  eq(hashline.parse_linenumber("42"), 42)
+  eq(select(2, hashline.parse_linenumber("42")), 42)
+  eq(hashline.parse_linenumber("3-9"), 3)
+  eq(select(2, hashline.parse_linenumber("3-9")), 9)
+end)
+
+case("hashline_parse_linenumber_rejects_garbage", function()
+  assert(hashline.parse_linenumber("x") == nil)
+  assert(hashline.parse_linenumber("9-3") == nil)
+  assert(hashline.parse_linenumber("0") == nil)
+  assert(hashline.parse_linenumber(42) == nil)
+end)
+
+case("hashline_replace_single_line", function()
+  local content = "fn foo() {}\nfn bar() {}\nfn baz() {}"
+  local h_bar = hashline.hash("fn bar() {}")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2", hash = h_bar, new_string = "fn bar() { return 1 }" },
+  })
+  eq(err, nil)
+  eq(result, "fn foo() {}\nfn bar() { return 1 }\nfn baz() {}")
+end)
+
+case("hashline_range_replaces_only_matched_line", function()
+  local content = "a\nb\nc\nd"
+  local h_c = hashline.hash("c")
+  local h_a = hashline.hash("a")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "3-4", hash = h_c, new_string = "z" },
+    { linenumber = "1", hash = h_a, new_string = "aa", insert = true },
+  })
+  eq(err, nil)
+  eq(result, "a\naa\nb\nz\nd")
+end)
+
+case("hashline_range_replaces_only_matched_line_leaving_rest", function()
+  local content = "a\nb\nc\nd\ne"
+  local h_c = hashline.hash("c")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2-4", hash = h_c, new_string = "z" },
+  })
+  eq(err, nil)
+  eq(result, "a\nb\nz\nd\ne")
+end)
+
+case("hashline_delete_single_line", function()
+  local content = "a\nb\nc"
+  local h_b = hashline.hash("b")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2", hash = h_b },
+  })
+  eq(err, nil)
+  eq(result, "a\nc")
+end)
+
+case("hashline_stale_hash_rejected", function()
+  local result, err = hashline.apply_edits("a\nb", { { linenumber = "1", hash = "zzz", new_string = "x" } })
+  eq(result, nil)
+  has(err, "not match")
+  has(err, "re-read")
+end)
+
+case("hashline_hash_not_in_range_rejected", function()
+  local content = "a\nb\nc\nd"
+  local h_a = hashline.hash("a")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "3-4", hash = h_a, new_string = "x" },
+  })
+  eq(result, nil)
+  has(err, "range")
+  has(err, "re-read")
+end)
+
+case("hashline_out_of_range_rejected", function()
+  local content = "a\nb"
+  local h_a = hashline.hash("a")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "1-9", hash = h_a, new_string = "x" },
+  })
+  eq(result, nil)
+  has(err, "out of range")
+end)
+
+case("hashline_bad_linenumber_rejected", function()
+  local result, err = hashline.apply_edits("a\nb", { { linenumber = "x", hash = "zzz", new_string = "y" } })
+  eq(result, nil)
+  has(err, "must be")
+end)
+
+case("hashline_missing_fields_rejected", function()
+  local result, err = hashline.apply_edits("a\nb", { { linenumber = "1", new_string = "y" } })
+  eq(result, nil)
+  has(err, "linenumber and hash")
+end)
+
+case("hashline_overlap_rejected", function()
+  local content = "a\nb\nc\nd"
+  local h_c = hashline.hash("c")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2-3", hash = h_c, new_string = "x" },
+    { linenumber = "3-4", hash = h_c, new_string = "y" },
+  })
+  eq(result, nil)
+  has(err, "overlap")
+end)
+
+case("hashline_preserves_trailing_newline", function()
+  local content = "a\nb\n"
+  local h_a = hashline.hash("a")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "1", hash = h_a, new_string = "z" },
+  })
+  eq(err, nil)
+  eq(result, "z\nb\n")
 end)
 
 if #failures > 0 then

@@ -1,6 +1,7 @@
 local ToolView = require("maki.tool_view")
 local helpers = require("memory_helpers")
 local ListPicker = require("maki.list_picker")
+local hashline = require("maki.hashline")
 
 local function memories_path_suffix()
   local cwd = maki.uv.cwd()
@@ -54,6 +55,23 @@ maki.api.register_prompt_hint({
   content = "- Proactively save non-obvious project gotchas and architecture decisions to **memory**.",
 })
 
+local function tag_lines(content)
+  local lines = hashline.split_lines(content)
+  local out = {}
+  for i, line in ipairs(lines) do
+    out[#out + 1] = i .. ":" .. hashline.hash(line) .. "|" .. line
+  end
+  return table.concat(out, "\n")
+end
+
+local function untag(s)
+  local out = {}
+  for line in (s .. "\n"):gmatch("([^\n]*)\n") do
+    out[#out + 1] = line:match("^%d+:[0-9a-z]+|(.*)$") or line
+  end
+  return table.concat(out, "\n")
+end
+
 local function render_content(content, path, ctx)
   local buf = maki.ui.buf()
   local tol = ctx:tool_output_lines()
@@ -88,7 +106,7 @@ local function cmd_view(path, dir, ctx)
     return nil, "read error: " .. err
   end
   return {
-    llm_output = content,
+    llm_output = tag_lines(content),
     body = render_content(content, path, ctx),
   }
 end
@@ -118,6 +136,41 @@ local function cmd_write(path, content, dir, ctx)
   }
 end
 
+local function cmd_edit(path, edits, dir, ctx)
+  local file_path, err = helpers.safe_resolve(dir, path)
+  if not file_path then
+    return nil, err
+  end
+  local meta = maki.fs.metadata(file_path)
+  if not meta then
+    return nil, "'" .. path .. "' does not exist"
+  end
+  local before, read_err = maki.fs.read(file_path)
+  if not before then
+    return nil, "read error: " .. tostring(read_err)
+  end
+  local after, apply_err = hashline.apply_edits(before, edits)
+  if not after then
+    return nil, apply_err
+  end
+  local lc = helpers.count_lines(after)
+  if lc > helpers.MAX_LINES_PER_FILE then
+    return nil, "result exceeds " .. helpers.MAX_LINES_PER_FILE .. " lines (" .. lc .. " lines); reduce content size"
+  end
+  if helpers.dir_total_bytes(dir) - meta.size + #after > helpers.MAX_DIR_BYTES then
+    return nil, "memory directory would exceed " .. helpers.MAX_DIR_BYTES .. " byte limit; delete stale entries first"
+  end
+  local ok, write_err = maki.fs.write(file_path, after)
+  if not ok then
+    return nil, "write error: " .. tostring(write_err)
+  end
+  local n = #edits
+  return {
+    llm_output = "edited " .. path .. " (" .. n .. (n == 1 and " edit" or " edits") .. ")",
+    body = render_content(after, path, ctx),
+  }
+end
+
 local function cmd_delete(path, dir)
   local file_path, err = helpers.safe_resolve(dir, path)
   if not file_path then
@@ -137,14 +190,42 @@ maki.api.register_tool({
   name = "memory",
   description = "Persistent, project-scoped scratchpad for learnings, patterns, decisions, and gotchas across sessions.\n\n"
     .. "- Save important context before compaction or to build up project knowledge.\n"
-    .. "- Keep entries concise and current. Delete outdated information.",
+    .. "- Keep entries concise and current. Delete outdated information.\n"
+    .. "- `view` returns each line tagged `NR:HASH|content`; pass the HASH with `edit` to change a line without retyping it.",
 
   schema = {
     type = "object",
     properties = {
-      command = { type = "string", description = "Command: view, write, delete", required = true },
+      command = { type = "string", description = "Command: view, write, edit, delete", required = true },
       path = { type = "string", description = "Relative path (e.g. 'architecture.md'). Omit to list all." },
       content = { type = "string", description = "File content for 'write'" },
+      edits = {
+        type = "array",
+        description = "Hash-anchored edits for 'edit' (applied bottom-to-top, must not overlap)",
+        items = {
+          type = "object",
+          properties = {
+            linenumber = {
+              type = "string",
+              description = '"N" for a single line or "N-M" to search an inclusive range (1-indexed); only the matched line is affected',
+              required = true,
+            },
+            hash = {
+              type = "string",
+              description = "Short content hash of the line to edit, from `view` output",
+              required = true,
+            },
+            new_string = {
+              type = "string",
+              description = "Replacement text (multi-line ok). Omit or empty to delete.",
+            },
+            insert = {
+              type = "boolean",
+              description = "Insert after the matched line instead of replacing (default false)",
+            },
+          },
+        },
+      },
     },
   },
 
@@ -156,7 +237,7 @@ maki.api.register_tool({
   end,
 
   restore = function(input, output, _is_error, ctx)
-    return render_content(output, input.path or "file.md", ctx)
+    return render_content(untag(output), input.path or "file.md", ctx)
   end,
 
   handler = function(input, ctx)
@@ -177,13 +258,21 @@ maki.api.register_tool({
         return "error: 'content' is required for write"
       end
       result, err = cmd_write(input.path, input.content, dir, ctx)
+    elseif cmd == "edit" then
+      if not input.path then
+        return "error: 'path' is required for edit"
+      end
+      if not input.edits or #input.edits == 0 then
+        return "error: 'edits' is required for edit"
+      end
+      result, err = cmd_edit(input.path, input.edits, dir, ctx)
     elseif cmd == "delete" then
       if not input.path then
         return "error: 'path' is required for delete"
       end
       result, err = cmd_delete(input.path, dir)
     else
-      return "error: unknown command '" .. tostring(cmd) .. "'. Valid commands: view, write, delete"
+      return "error: unknown command '" .. tostring(cmd) .. "'. Valid commands: view, write, edit, delete"
     end
     if err then
       return "error: " .. err
