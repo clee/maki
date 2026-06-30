@@ -1032,6 +1032,184 @@ end)
 
 local ListPicker = require("maki.list_picker")
 
+local hashline = require("maki.hashline")
+
+case("hashline_hash_length_and_charset", function()
+  local h = hashline.hash("hello world")
+  eq(#h, hashline.HASH_LEN)
+  eq(h:match("^[0-9a-z]+$") ~= nil, true)
+end)
+
+case("hashline_hash_deterministic", function()
+  eq(hashline.hash("abc"), hashline.hash("abc"))
+end)
+
+case("hashline_hash_differs_for_different_lines", function()
+  local a = hashline.hash("let x = 1")
+  local b = hashline.hash("let x = 2")
+  eq(a ~= b, true)
+end)
+
+case("hashline_replace_single_line", function()
+  local content = "fn foo() {}\nfn bar() {}\nfn baz() {}"
+  local h_bar = hashline.hash("fn bar() {}")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2", hash = h_bar, new_string = "fn bar() { return 1 }" },
+  })
+  eq(err, nil)
+  eq(result, "fn foo() {}\nfn bar() { return 1 }\nfn baz() {}")
+end)
+
+case("hashline_range_replaces_only_matched_line", function()
+  local content = "a\nb\nc\nd\ne"
+  local h_b = hashline.hash("b")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2-4", hash = h_b, new_string = "x" },
+  })
+  eq(err, nil)
+  eq(result, "a\nx\nc\nd\ne")
+end)
+
+case("hashline_range_replaces_matched_middle_line", function()
+  local content = "a\nb\nc\nd\ne"
+  local h_c = hashline.hash("c")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2-4", hash = h_c, new_string = "z" },
+  })
+  eq(err, nil)
+  eq(result, "a\nb\nz\nd\ne")
+end)
+
+case("hashline_insert_after", function()
+  local content = "a\nb\nc"
+  local h_b = hashline.hash("b")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2", hash = h_b, new_string = "x\ny", insert = true },
+  })
+  eq(err, nil)
+  eq(result, "a\nb\nx\ny\nc")
+end)
+
+case("hashline_range_deletes_only_matched_line", function()
+  local content = "a\nb\nc\nd\ne"
+  local h_b = hashline.hash("b")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2-4", hash = h_b },
+  })
+  eq(err, nil)
+  eq(result, "a\nc\nd\ne")
+end)
+
+case("hashline_delete_single_line", function()
+  local content = "a\nb\nc"
+  local h_b = hashline.hash("b")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2", hash = h_b, new_string = "" },
+  })
+  eq(err, nil)
+  eq(result, "a\nc")
+end)
+
+case("hashline_stale_hash_returns_error", function()
+  local result, err = hashline.apply_edits("a\nb", {
+    { linenumber = "1", hash = "zzz", new_string = "x" },
+  })
+  eq(result, nil)
+  eq(err:find("not match", 1, true) ~= nil, true)
+  eq(err:find("re-read", 1, true) ~= nil, true)
+end)
+
+case("hashline_hash_not_in_range_returns_error", function()
+  local content = "a\nb\nc\nd"
+  local h_a = hashline.hash("a")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "3-4", hash = h_a, new_string = "x" },
+  })
+  eq(result, nil)
+  eq(err:find("range", 1, true) ~= nil, true)
+end)
+
+case("hashline_out_of_range_returns_error", function()
+  local result, err = hashline.apply_edits("a\nb", {
+    { linenumber = "1-9", hash = hashline.hash("a"), new_string = "x" },
+  })
+  eq(result, nil)
+  eq(err, string.format(hashline.OUT_OF_RANGE, 9, 2))
+end)
+
+case("hashline_bad_linenumber_returns_error", function()
+  local result, err = hashline.apply_edits("a\nb", {
+    { linenumber = "x", hash = "zzz", new_string = "y" },
+  })
+  eq(result, nil)
+  eq(err, hashline.BAD_LINENUMBER)
+end)
+
+case("hashline_overlapping_edits_rejected", function()
+  local content = "a\nb\nc\nd"
+  local h_a = hashline.hash("a")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "1-3", hash = h_a, new_string = "x" },
+    { linenumber = "1", hash = h_a, new_string = "y" },
+  })
+  eq(result, nil)
+  eq(err, hashline.OVERLAP)
+end)
+
+case("hashline_multiple_edits_bottom_to_top", function()
+  local content = "a\nb\nc\nd"
+  local h_b = hashline.hash("b")
+  local h_c = hashline.hash("c")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2", hash = h_b, new_string = "B" },
+    { linenumber = "3", hash = h_c, new_string = "C1", insert = true },
+  })
+  eq(err, nil)
+  eq(result, "a\nB\nc\nC1\nd")
+end)
+
+case("hashline_preserves_trailing_newline", function()
+  local content = "a\nb\n"
+  local h_a = hashline.hash("a")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "1", hash = h_a, new_string = "A" },
+  })
+  eq(err, nil)
+  eq(result, "A\nb\n")
+end)
+
+case("hashline_empty_edits_returns_content", function()
+  local result, err = hashline.apply_edits("a\nb", {})
+  eq(err, nil)
+  eq(result, "a\nb")
+end)
+
+case("hashline_missing_linenumber_rejected", function()
+  local result, err = hashline.apply_edits("a\nb", { {} })
+  eq(result, nil)
+  eq(err, hashline.MISSING_LINENUMBER)
+end)
+
+case("hashline_replace_last_line", function()
+  local content = "a\nb\nc"
+  local h_c = hashline.hash("c")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "3", hash = h_c, new_string = "C\nD" },
+  })
+  eq(err, nil)
+  eq(result, "a\nb\nC\nD")
+end)
+
+case("hashline_insert_after_last_line", function()
+  local content = "a\nb"
+  local h_b = hashline.hash("b")
+  local result, err = hashline.apply_edits(content, {
+    { linenumber = "2", hash = h_b, new_string = "c", insert = true },
+  })
+  eq(err, nil)
+  eq(result, "a\nb\nc")
+end)
+
 case("set_highlight_number_width_scales", function()
   local buf = mock_buf()
   local view = ToolView.new(buf, { max_lines = 200 })

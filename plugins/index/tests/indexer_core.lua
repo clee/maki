@@ -1,4 +1,5 @@
 local helpers = require("tests.helpers")
+local hashline = require("maki.hashline")
 local case = helpers.case
 local idx_with_meta = helpers.idx_with_meta
 
@@ -74,5 +75,23 @@ mod tests {
       end
     end
     assert(found, "section header '" .. hdr .. "' not found in output")
+  end
+end)
+
+case("core_ranged_lines_have_correct_first_line_for_hash", function()
+  local src = "use std::io;\n\npub fn main() {}\n"
+  local text, meta = idx_with_meta(src, "rust")
+  local lines = helpers.split_lines(text)
+  local source_lines = hashline.split_lines(src)
+  for i, line in ipairs(lines) do
+    local m = meta and meta[i]
+    if m and m.range then
+      local first = tonumber(m.range:match("(%d+)"))
+      assert(first, "range '" .. tostring(m.range) .. "' has no first line number")
+      assert(source_lines[first] ~= nil, "source line " .. first .. " does not exist")
+      local h = hashline.hash(source_lines[first])
+      assert(#h == hashline.HASH_LEN, "hash '" .. h .. "' has wrong length")
+      assert(h:match("^[0-9a-z]+$") ~= nil, "hash '" .. h .. "' has wrong charset")
+    end
   end
 end)

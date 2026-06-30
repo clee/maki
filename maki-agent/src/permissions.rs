@@ -32,6 +32,7 @@ fn builtin_rules(cwd: &Path) -> Vec<PermissionRule> {
         allow("write", &cwd_glob),
         allow("edit", &cwd_glob),
         allow("multiedit", &cwd_glob),
+        allow("hashedit", &cwd_glob),
         allow("task", "*"),
     ]
 }
@@ -497,7 +498,7 @@ pub fn generalized_scopes(tool: &str, scopes: &[String]) -> Vec<String> {
 fn generalize_scope(tool: &str, scope: &str) -> String {
     match tool {
         "bash" => generalize_bash_segment(scope),
-        "write" | "edit" | "multiedit" => {
+        "write" | "edit" | "multiedit" | "hashedit" => {
             let p = Path::new(scope);
             match p.parent() {
                 Some(parent) if !parent.as_os_str().is_empty() => {

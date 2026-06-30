@@ -59,6 +59,7 @@ pub(crate) struct EventLoop<'t> {
     app: App,
     handles: AgentHandles,
     model_slot: Arc<ArcSwap<ModelSlot>>,
+    last_synced_slot: Option<Arc<ModelSlot>>,
     config: AgentConfig,
     permissions: Arc<PermissionManager>,
     shell_tx: flume::Sender<ShellEvent>,
@@ -263,6 +264,7 @@ impl<'t> EventLoop<'t> {
             timeouts,
             ui_action_rx,
             _model_fetch_task: bg.task,
+            last_synced_slot: None,
         })
     }
 
@@ -323,9 +325,15 @@ impl<'t> EventLoop<'t> {
             self.app.flash(warning);
         }
 
-        let slot_model = self.model_slot.load();
-        if slot_model.model.context_window != self.app.state.model.context_window {
+        let slot_model = self.model_slot.load_full();
+        if !self
+            .last_synced_slot
+            .as_ref()
+            .map(|prev| Arc::ptr_eq(prev, &slot_model))
+            .unwrap_or(false)
+        {
             self.app.update_model(&slot_model.model);
+            self.last_synced_slot = Some(slot_model);
         }
 
         if let Some(rx) = &self.ui_action_rx {

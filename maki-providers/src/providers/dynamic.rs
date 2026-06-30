@@ -17,6 +17,7 @@ use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 use super::ResolvedAuth;
 use super::anthropic::Anthropic;
+use super::aperture::Aperture;
 use super::copilot::Copilot;
 use super::deepseek::DeepSeek;
 use super::google::Google;
@@ -111,15 +112,45 @@ fn providers_dir() -> Option<PathBuf> {
 }
 
 fn run_script(path: &Path, subcommand: &str, timeout: Duration) -> Result<String, AgentError> {
-    let mut child = Command::new(path)
-        .arg(subcommand)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| AgentError::Config {
-            message: format!("failed to run {} {subcommand}: {e}", path.display()),
-        })?;
+    let spawn = |path: &Path, subcommand: &str| {
+        Command::new(path)
+            .arg(subcommand)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+    };
+    let mut child = {
+        const SPAWN_ATTEMPTS: u8 = 8;
+        let mut last_err = None;
+        let mut child = None;
+        for _ in 0..SPAWN_ATTEMPTS {
+            match spawn(path, subcommand) {
+                Ok(c) => {
+                    child = Some(c);
+                    break;
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        || e.raw_os_error() == Some(26 /* ETXTBSY */) =>
+                {
+                    last_err = Some(e);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+        child.ok_or_else(|| AgentError::Config {
+            message: format!(
+                "failed to run {} {subcommand}: {}",
+                path.display(),
+                last_err.map(|e| e.to_string()).unwrap_or_default()
+            ),
+        })?
+    };
 
     let output = match wait_timeout::ChildExt::wait_timeout(&mut child, timeout) {
         Ok(Some(_)) => child.wait_with_output().map_err(|e| AgentError::Config {
@@ -394,6 +425,10 @@ pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>
             TensorX::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
+        ProviderKind::Aperture => Box::new(
+            Aperture::with_auth(auth.clone(), timeouts)
+                .with_system_prefix(meta.system_prefix.clone()),
+        ),
     };
 
     Ok(Box::new(DynamicProvider {
@@ -448,6 +483,7 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
         tier: script_model.tier,
         family: meta.base.family(),
         supports_tool_examples_override: script_model.supports_tool_examples,
+        reasoning: meta.base.reasoning(),
         pricing: script_model.pricing.clone().unwrap_or_default(),
         max_output_tokens: script_model.max_output_tokens,
         context_window: script_model.context_window,
@@ -464,6 +500,7 @@ pub fn find_model_for_tier(slug: &str, tier: ModelTier) -> Option<Model> {
         tier,
         family: meta.base.family(),
         supports_tool_examples_override: script_model.supports_tool_examples,
+        reasoning: meta.base.reasoning(),
         pricing: script_model.pricing.clone().unwrap_or_default(),
         max_output_tokens: script_model.max_output_tokens,
         context_window: script_model.context_window,

@@ -43,6 +43,7 @@ const TOOL_NAME_MAP: &[(&str, &str)] = &[
     ("websearch", "WebSearch"),
     ("task", "Task"),
     ("multiedit", "MultiEdit"),
+    ("hashedit", "HashEdit"),
     ("code_execution", "CodeExecution"),
     ("index", "Index"),
     ("memory", "Memory"),
@@ -1026,6 +1027,7 @@ mod tests {
     #[test_case("websearch", "WebSearch")]
     #[test_case("task", "Task")]
     #[test_case("multiedit", "MultiEdit")]
+    #[test_case("hashedit", "HashEdit")]
     #[test_case("code_execution", "CodeExecution")]
     #[test_case("index", "Index")]
     #[test_case("memory", "Memory")]
