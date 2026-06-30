@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::warn;
 
-use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
+use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier, ReasoningSupport};
 use crate::provider::{BoxFuture, Provider};
 use crate::{
     AgentError, ContentBlock, Message, ProviderEvent, RequestOptions, Role, StopReason,
@@ -48,6 +48,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 65_536,
             context_window: 1_048_576,
+            reasoning: ReasoningSupport::OpenAiEffort,
         },
         ModelEntry {
             prefixes: &["gemini-2.5-flash"],
@@ -63,6 +64,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 65_536,
             context_window: 1_048_576,
+            reasoning: ReasoningSupport::OpenAiEffort,
         },
         ModelEntry {
             prefixes: &["gemini-2.0-flash-lite"],
@@ -78,6 +80,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 65_536,
             context_window: 1_048_576,
+            reasoning: ReasoningSupport::OpenAiEffort,
         },
     ]
 }
@@ -617,7 +620,7 @@ mod tests {
             tier: ModelTier::Medium,
             family: ModelFamily::Gemini,
             supports_tool_examples_override: None,
-            supports_thinking_override: None,
+            reasoning: crate::provider::ProviderKind::Google.reasoning(),
             pricing: ModelPricing::default(),
             max_output_tokens: 8192,
             context_window: 1_048_576,
@@ -647,7 +650,7 @@ mod tests {
             tier: ModelTier::Medium,
             family: ModelFamily::Gemini,
             supports_tool_examples_override: None,
-            supports_thinking_override: None,
+            reasoning: crate::provider::ProviderKind::Google.reasoning(),
             pricing: ModelPricing::default(),
             max_output_tokens: 8192,
             context_window: 1_048_576,
@@ -671,7 +674,7 @@ mod tests {
             tier: ModelTier::Medium,
             family: ModelFamily::Gemini,
             supports_tool_examples_override: None,
-            supports_thinking_override: None,
+            reasoning: crate::provider::ProviderKind::Google.reasoning(),
             pricing: ModelPricing::default(),
             max_output_tokens: 8192,
             context_window: 1_048_576,

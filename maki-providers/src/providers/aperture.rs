@@ -7,7 +7,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::warn;
 
-use crate::model::{Model, ModelEntry, ModelInfo, ModelPricing, lookup_entry, models_for_provider};
+use crate::model::{
+    Model, ModelEntry, ModelInfo, ModelPricing, ReasoningSupport, lookup_entry, models_for_provider,
+};
 use crate::provider::{BoxFuture, Provider, ProviderKind};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
@@ -56,6 +58,11 @@ struct OverrideFields {
     context_window: Option<u32>,
     #[serde(default)]
     max_output_tokens: Option<u32>,
+    /// Override the model's reasoning support. Wins over the routed
+    /// provider's own capability; useful for gateway models that differ from
+    /// their base. One of `none`, `anthropic`, `openai-effort`, `glm-effort`.
+    #[serde(default)]
+    reasoning: Option<ReasoningSupport>,
     /// Remap this model/provider to a native provider (e.g. an opaque gateway
     /// vendor `ikora-openai` that is really a `llama-cpp` server). Must name an
     /// OpenAI-compatible provider; validated once at load.
@@ -136,6 +143,9 @@ fn merged_override(overrides: &Overrides, provider_id: &str, model_id: &str) -> 
         }
         if m.base.is_some() {
             out.base = m.base.clone();
+        }
+        if m.reasoning.is_some() {
+            out.reasoning = m.reasoning;
         }
     }
     out
@@ -337,10 +347,11 @@ fn apply_adjustments(model: &mut Model, overrides: &Overrides) {
     };
     if let Some(kind) = routed_kind(provider_id, overrides, model_id) {
         model.family = kind.family();
-        model.supports_thinking_override = Some(kind.supports_thinking());
+        model.reasoning = kind.reasoning();
         if let Ok(entry) = lookup_entry(models_for_provider(kind), model_id) {
             model.context_window = entry.context_window;
             model.max_output_tokens = entry.max_output_tokens;
+            model.reasoning = entry.reasoning;
         }
     }
     let ov = merged_override(overrides, provider_id, model_id);
@@ -349,6 +360,9 @@ fn apply_adjustments(model: &mut Model, overrides: &Overrides) {
     }
     if let Some(mo) = ov.max_output_tokens {
         model.max_output_tokens = mo;
+    }
+    if let Some(reasoning) = ov.reasoning {
+        model.reasoning = reasoning;
     }
 }
 
@@ -524,6 +538,7 @@ mod tests {
         assert!(ov.context_window.is_none());
         assert!(ov.max_output_tokens.is_none());
         assert!(ov.base.is_none());
+        assert!(ov.reasoning.is_none());
     }
 
     #[test]
@@ -609,26 +624,30 @@ mod tests {
         apply_adjustments(&mut model, &Overrides::new());
         assert_eq!(model.context_window, before.context_window);
         assert_eq!(model.max_output_tokens, before.max_output_tokens);
-        assert!(model.supports_thinking_override.is_none());
-        assert!(!model.supports_thinking());
+        assert_eq!(model.reasoning, before.reasoning);
     }
 
     #[test_case("aperture/openai/gpt-test", ProviderKind::OpenAi ; "routed_thinking_capable")]
     #[test_case("aperture/ollama/qwen3", ProviderKind::Ollama ; "routed_non_thinking")]
-    #[test_case("aperture/zai/glm-5.2", ProviderKind::Zai ; "routed_zai")]
-    fn apply_adjustments_thinking_follows_routed_kind(spec: &str, kind: ProviderKind) {
+    fn apply_adjustments_reasoning_follows_routed_kind(spec: &str, kind: ProviderKind) {
         let mut model = Model::from_spec(spec).unwrap();
-        assert!(model.supports_thinking_override.is_none());
         apply_adjustments(&mut model, &Overrides::new());
-        assert_eq!(
-            model.supports_thinking_override,
-            Some(kind.supports_thinking())
-        );
-        assert_eq!(model.supports_thinking(), kind.supports_thinking());
+        // No static entry for these ids, so the routed kind's default wins.
+        assert_eq!(model.reasoning, kind.reasoning());
+    }
+
+    // zai/glm-5.2 has a static entry with GlmEffort, which wins over Zai's
+    // provider-level default (None).
+    #[test]
+    fn apply_adjustments_static_entry_reasoning_wins_over_routed_kind_default() {
+        let mut model = Model::from_spec("aperture/zai/glm-5.2").unwrap();
+        apply_adjustments(&mut model, &Overrides::new());
+        assert_eq!(model.reasoning, ReasoningSupport::GlmEffort);
+        assert!(model.supports_thinking());
     }
 
     #[test]
-    fn apply_adjustments_thinking_via_base_override() {
+    fn apply_adjustments_reasoning_via_base_override() {
         let mut overrides = Overrides::new();
         overrides.insert(
             "ikora-openai".into(),
@@ -642,10 +661,52 @@ mod tests {
         );
         let mut model = Model::from_spec("aperture/ikora-openai/gemma4").unwrap();
         apply_adjustments(&mut model, &overrides);
-        assert_eq!(
-            model.supports_thinking_override,
-            Some(ProviderKind::LlamaCpp.supports_thinking())
+        assert_eq!(model.reasoning, ProviderKind::LlamaCpp.reasoning());
+    }
+
+    #[test]
+    fn apply_adjustments_reasoning_override_wins_over_route() {
+        // zai/glm-5.2 routes to Zai (reasoning None); the override forces
+        // GlmEffort so /thinking works and emits the GLM value space.
+        let mut overrides = Overrides::new();
+        overrides.insert(
+            "zai".into(),
+            ProviderOverride {
+                default: OverrideFields::default(),
+                models: HashMap::from([(
+                    "glm-5.2".into(),
+                    OverrideFields {
+                        reasoning: Some(ReasoningSupport::GlmEffort),
+                        ..Default::default()
+                    },
+                )]),
+            },
         );
+        let mut model = Model::from_spec("aperture/zai/glm-5.2").unwrap();
+        apply_adjustments(&mut model, &overrides);
+        assert_eq!(model.reasoning, ReasoningSupport::GlmEffort);
+        assert!(model.supports_thinking());
+    }
+
+    #[test]
+    fn apply_adjustments_reasoning_override_disables_routed_capable_model() {
+        // openai/gpt-test routes to OpenAi (reasoning OpenAiEffort); override
+        // forces None so /thinking is rejected.
+        let mut overrides = Overrides::new();
+        overrides.insert(
+            "openai".into(),
+            ProviderOverride {
+                default: OverrideFields {
+                    reasoning: Some(ReasoningSupport::None),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let mut model = Model::from_spec("aperture/openai/gpt-test").unwrap();
+        apply_adjustments(&mut model, &overrides);
+        assert_eq!(model.reasoning, ReasoningSupport::None);
+        assert!(!model.supports_thinking());
     }
 
     #[test]

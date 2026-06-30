@@ -102,6 +102,22 @@ pub enum ModelFamily {
     Synthetic,
 }
 
+/// Per-model reasoning capability and wire format. Replaces the old
+/// provider-level `supports_thinking` allowlist and the `is_glm_52` string
+/// match: each model declares its own value space.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReasoningSupport {
+    #[default]
+    None,
+    /// Anthropic `thinking` field with `budget_tokens` (adaptive for opus 4.7+).
+    Anthropic,
+    /// OpenAI `reasoning_effort` field, value space low/medium/high.
+    OpenAiEffort,
+    /// GLM-5.2 `reasoning_effort` field, value space none/high/xhigh.
+    GlmEffort,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelTier {
@@ -156,6 +172,7 @@ pub struct ModelEntry {
     pub pricing: ModelPricing,
     pub max_output_tokens: u32,
     pub context_window: u32,
+    pub reasoning: ReasoningSupport,
 }
 
 pub(crate) fn lookup_entry<'a>(
@@ -206,10 +223,7 @@ pub struct Model {
     pub tier: ModelTier,
     pub family: ModelFamily,
     pub supports_tool_examples_override: Option<bool>,
-    /// Resolved thinking support, used by gateway providers (e.g. Aperture) that
-    /// stream through a native provider chosen at runtime. `None` falls back to
-    /// the provider's own capability.
-    pub supports_thinking_override: Option<bool>,
+    pub reasoning: ReasoningSupport,
     pub pricing: ModelPricing,
     pub max_output_tokens: u32,
     pub context_window: u32,
@@ -228,12 +242,13 @@ impl Model {
             .read()
             .unwrap()
             .tier_for(&spec, provider, static_entry.map(|e| e.tier));
-        let (family, pricing, max_output_tokens, context_window) = match static_entry {
+        let (family, pricing, max_output_tokens, context_window, reasoning) = match static_entry {
             Some(e) => (
                 e.family,
                 e.pricing.clone(),
                 e.max_output_tokens,
                 anthropic::shared::long_context_window(model_id).unwrap_or(e.context_window),
+                e.reasoning,
             ),
             None => {
                 let guard = crate::model_registry::model_registry().read().unwrap();
@@ -249,6 +264,7 @@ impl Model {
                     discovered
                         .and_then(|d| d.context_window)
                         .unwrap_or_else(|| provider.fallback_context_window()),
+                    provider.reasoning(),
                 )
             }
         };
@@ -259,21 +275,20 @@ impl Model {
             tier,
             family,
             supports_tool_examples_override: None,
-            supports_thinking_override: None,
+            reasoning,
             pricing,
             max_output_tokens,
             context_window,
         }
     }
 
+    pub fn supports_thinking(&self) -> bool {
+        self.reasoning != ReasoningSupport::None
+    }
+
     pub fn supports_tool_examples(&self) -> bool {
         self.supports_tool_examples_override
             .unwrap_or_else(|| self.family.supports_tool_examples())
-    }
-
-    pub fn supports_thinking(&self) -> bool {
-        self.supports_thinking_override
-            .unwrap_or_else(|| self.provider.supports_thinking())
     }
 
     /// A model supports fast mode exactly when it carries fast-tier pricing, so
@@ -625,38 +640,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn aperture_glm_5_2_end_to_end_pricing_survives_from_spec() {
-        // Aperture has no static table; pricing must come from the discovered
-        // registry (populated by parse_models from the gateway's /v1/models).
-        // Reproduces the registry state for the real glm-5.2 entry, then resolves
-        // via from_spec exactly as spawn_model_fetch's done closure does.
-        let parsed = vec![ModelInfo {
-            id: "zai/glm-5.2".to_string(),
-            context_window: None,
-            max_output_tokens: None,
-            pricing: Some(ModelPricing {
-                input: 0.95,
-                output: 3.0,
-                cache_read: 0.18,
-                cache_write: 0.0,
-                fast: None,
-            }),
-        }];
-        crate::model_registry::model_registry()
-            .write()
-            .unwrap()
-            .set_known_models(ProviderKind::Aperture, parsed);
+    #[test_case("zai/glm-5.2", ReasoningSupport::GlmEffort, true ; "glm_5_2_supports_thinking")]
+    #[test_case("zai/glm-5.1", ReasoningSupport::None, false ; "glm_5_1_no_thinking")]
+    #[test_case("zai/glm-4.7", ReasoningSupport::None, false ; "glm_4_7_no_thinking")]
+    #[test_case("anthropic/claude-opus-4-8", ReasoningSupport::Anthropic, true ; "anthropic_supports_thinking")]
+    fn per_model_reasoning_from_static_table(
+        spec: &str,
+        expected_reasoning: ReasoningSupport,
+        expected_supports: bool,
+    ) {
+        let model = Model::from_spec(spec).unwrap();
+        assert_eq!(model.reasoning, expected_reasoning);
+        assert_eq!(model.supports_thinking(), expected_supports);
+    }
 
-        let model = Model::from_spec("aperture/zai/glm-5.2").expect("spec resolves");
-        assert!(
-            (model.pricing.input - 0.95).abs() < 1e-9,
-            "input pricing lost"
-        );
-        assert!(
-            (model.pricing.output - 3.0).abs() < 1e-9,
-            "output pricing lost"
-        );
+    #[test_case("openrouter/unknown-model", true ; "openrouter_falls_back_to_openai_effort")]
+    #[test_case("ollama/llama3", false ; "ollama_falls_back_to_none")]
+    fn dynamic_model_reasoning_falls_back_to_provider(spec: &str, expected_supports: bool) {
+        // Dynamic/discovered models with no static entry inherit the provider's
+        // reasoning capability: OpenRouter -> OpenAiEffort (true), Ollama -> None (false).
+        // reasoning capability (Ollama -> None).
+        let model = Model::from_spec(spec).unwrap();
+        assert_eq!(model.supports_thinking(), expected_supports);
     }
 
     #[test_case("claude-opus-4-6" ; "opus_4_6")]

@@ -1176,7 +1176,7 @@ impl App {
             }
             "/thinking" => {
                 if !self.state.model.supports_thinking() {
-                    self.flash("Thinking requires a provider that supports it".into());
+                    self.flash("Thinking requires a model that supports it".into());
                     return vec![];
                 }
                 match ThinkingConfig::parse(cmd.args.trim(), self.state.thinking) {
