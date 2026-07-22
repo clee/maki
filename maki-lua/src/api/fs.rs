@@ -436,17 +436,40 @@ async fn write(lua: Lua, path: String, content: String) -> LuaResult<(Value, Val
     result_pair(&lua, smol::fs::write(&abs, content).await.map(|()| true))
 }
 
-/// Delete the file at {path}. Does not remove directories.
+/// Delete the file, symlink, or empty directory at {path}.
+/// Pass `recursive = true` to remove a non-empty directory tree (like `rm -r`).
+/// Symlinks are removed themselves, never followed.
 ///
-/// @param path string Path to the file to remove.
+/// @param path string Path to the file or directory to remove.
+/// @param opts table? `recursive` (boolean, default false): remove a directory and its contents recursively.
 /// @return (true?, string?) `true` on success, or nil plus an error message.
 /// @example
 /// local ok, err = maki.fs.rm("temp.txt")
 /// if err then print("rm failed: " .. err) end
+/// maki.fs.rm("stale_dir", { recursive = true })
 #[lua_fn(guard = FsWrite)]
-async fn rm(lua: Lua, path: String) -> LuaResult<(Value, Value)> {
+async fn rm(lua: Lua, path: String, opts: Option<Table>) -> LuaResult<(Value, Value)> {
     let abs = make_absolute(&path)?;
-    result_pair(&lua, smol::fs::remove_file(&abs).await.map(|()| true))
+    let recursive = opts
+        .as_ref()
+        .and_then(|t| t.get::<bool>("recursive").ok())
+        .unwrap_or(false);
+    let result = smol::unblock(move || -> std::io::Result<()> {
+        let meta = std::fs::symlink_metadata(&abs)?;
+        if meta.is_file() || meta.file_type().is_symlink() {
+            std::fs::remove_file(&abs)
+        } else if meta.is_dir() {
+            if recursive {
+                std::fs::remove_dir_all(&abs)
+            } else {
+                std::fs::remove_dir(&abs)
+            }
+        } else {
+            Err(std::io::Error::other("rm: not a file or directory"))
+        }
+    })
+    .await;
+    result_pair(&lua, result.map(|()| true))
 }
 
 /// Create the directory at {path}. Set `parents = true` to create
@@ -937,6 +960,80 @@ mod tests {
             "should fail for nonexistent"
         );
         assert!(matches!(err, mlua::Value::String(_)));
+    }
+
+    #[test]
+    fn rm_empty_dir_without_recursive() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("emptydir");
+        std::fs::create_dir(&dir).unwrap();
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let rm: mlua::Function = tbl.get("rm").unwrap();
+        let (ok, _): (mlua::Value, mlua::Value) =
+            smol::block_on(rm.call_async(dir.to_str().unwrap())).unwrap();
+        assert!(matches!(ok, mlua::Value::Boolean(true)));
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn rm_nonempty_dir_without_recursive_fails() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("nonempty");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("child.txt"), "x").unwrap();
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let rm: mlua::Function = tbl.get("rm").unwrap();
+        let (ok, err): (mlua::Value, mlua::Value) =
+            smol::block_on(rm.call_async(dir.to_str().unwrap())).unwrap();
+        assert!(
+            matches!(ok, mlua::Value::Nil),
+            "should fail without recursive"
+        );
+        assert!(matches!(err, mlua::Value::String(_)));
+        assert!(dir.exists(), "non-empty dir should still exist");
+    }
+
+    #[test]
+    fn rm_recursive_removes_tree() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("tree");
+        std::fs::create_dir_all(dir.join("sub/deeper")).unwrap();
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        std::fs::write(dir.join("sub/b.txt"), "b").unwrap();
+        std::fs::write(dir.join("sub/deeper/c.txt"), "c").unwrap();
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let rm: mlua::Function = tbl.get("rm").unwrap();
+        let opts = lua.create_table().unwrap();
+        opts.set("recursive", true).unwrap();
+        let (ok, _): (mlua::Value, mlua::Value) =
+            smol::block_on(rm.call_async((dir.to_str().unwrap(), opts))).unwrap();
+        assert!(matches!(ok, mlua::Value::Boolean(true)));
+        assert!(!dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rm_symlink_removes_link_not_target() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target.txt");
+        std::fs::write(&target, "data").unwrap();
+        let link = tmp.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let rm: mlua::Function = tbl.get("rm").unwrap();
+        let (ok, _): (mlua::Value, mlua::Value) =
+            smol::block_on(rm.call_async(link.to_str().unwrap())).unwrap();
+        assert!(matches!(ok, mlua::Value::Boolean(true)));
+        assert!(!link.exists(), "symlink should be removed");
+        assert!(target.exists(), "target should remain");
     }
 
     #[test]
