@@ -110,30 +110,85 @@ impl ImageSource {
 
 pub const IMAGE_OMITTED_NOTE: &str =
     "[image omitted: the current model does not support image input]";
+
 /// See [`Message::empty_marker`].
 pub const EMPTY_RESPONSE_MARKER: &str = "(empty)";
+ 
+ /// For models without vision, image blocks become a text note instead of a
+ /// wire block the API would reject. History keeps the pixels, so switching
+ /// back to a vision-capable model restores them.
+pub const IMAGE_TRUNCATED_NOTE: &str = "[image omitted: too many images in conversation]";
 
-/// For models without vision, image blocks become a text note instead of a
-/// wire block the API would reject. History keeps the pixels, so switching
-/// back to a vision-capable model restores them.
+/// Per-request image cap. Wire APIs reject requests past this many image
+/// blocks (observed on llama.cpp; 32 is the most conservative seen). History
+/// accumulates a pixel block per `view_image` and resends all of them each
+/// turn, so without a cap a long vision session eventually hard-fails. A
+/// vision-less model sends no images at all (the API would reject them).
+pub const MAX_IMAGES_PER_REQUEST: usize = 32;
+
+/// Cap the image blocks sent to the model. Each surviving image keeps its
+/// pixels; demoted blocks become `IMAGE_TRUNCATED_NOTE` (vision model) or
+/// `IMAGE_OMITTED_NOTE` (text-only model). History is untouched either way, so
+/// switching to a model with a higher cap (or back to vision) restores pixels.
+///
+/// When the count exceeds the cap, survivors are the newest images (the
+/// current turn, which the model is being asked about) plus the oldest ones
+/// (references / baselines); the second-most-recent are demoted first, since a
+/// prior iteration's screenshot has the lowest marginal value once the latest
+/// turn supersedes it. This keeps the stable oldest prefix intact (good for
+/// server-side prefix caching) while guaranteeing the outgoing count never
+/// exceeds the cap.
 pub fn adapt_images_for_model<'a>(model: &Model, messages: &'a [Message]) -> Cow<'a, [Message]> {
-    let has_image = |m: &Message| {
-        m.content
-            .iter()
-            .any(|b| matches!(b, ContentBlock::Image { .. }))
+    let is_image = |b: &ContentBlock| matches!(b, ContentBlock::Image { .. });
+    let total: usize = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter(|b| is_image(b))
+        .count();
+    let max_images = if model.supports_vision() {
+        MAX_IMAGES_PER_REQUEST
+    } else {
+        0
     };
-    if model.supports_vision() || !messages.iter().any(has_image) {
+    if total <= max_images {
         return Cow::Borrowed(messages);
     }
+
+    let note = if model.supports_vision() {
+        IMAGE_TRUNCATED_NOTE
+    } else {
+        IMAGE_OMITTED_NOTE
+    };
+
+    // Protect every image in the final message (the current turn); the model
+    // must see what it's being asked about. Up to `max_images` of them survive;
+    // if a single turn overflows, only its newest `max_images` stay.
+    let latest_k = messages
+        .last()
+        .map(|m| m.content.iter().filter(|b| is_image(b)).count())
+        .unwrap_or(0);
+    let keep_latest = latest_k.min(max_images);
+    let keep_oldest = max_images.saturating_sub(keep_latest);
+
+    // A global index over image blocks. Survivors are [0, keep_oldest) and the
+    // trailing keep_latest of the total; everything between is demoted. Idea
+    // being that if a user is iterating with a model on a design, initial
+    // baseline reference images and the absolute latest ones are the most
+    // important to keep.
+    let mut seen = 0;
     let adapted = messages
         .iter()
         .map(|m| {
             let mut m = m.clone();
             for block in &mut m.content {
-                if matches!(block, ContentBlock::Image { .. }) {
-                    *block = ContentBlock::Text {
-                        text: IMAGE_OMITTED_NOTE.into(),
-                    };
+                if is_image(block) {
+                    let survives = seen < keep_oldest || seen >= total - keep_latest;
+                    if !survives {
+                        *block = ContentBlock::Text {
+                            text: note.into(),
+                        };
+                    }
+                    seen += 1;
                 }
             }
             m
@@ -1007,6 +1062,119 @@ mod tests {
         assert!(
             matches!(&adapted[0].content[1], ContentBlock::Text { text } if text == IMAGE_OMITTED_NOTE)
         );
+    }
+
+    #[test]
+    fn adapt_images_demotes_second_most_recent_keeps_newest_and_oldest() {
+        let model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
+        // 33 single-image messages: index 32 is the current turn (newest),
+        // index 31 is second-most-recent, indices 0..31 are the oldest 31.
+        let messages: Vec<Message> = (0..MAX_IMAGES_PER_REQUEST + 1)
+            .map(|i| Message {
+                role: Role::User,
+                content: vec![ContentBlock::Image {
+                    source: ImageSource::new(
+                        ImageMediaType::Png,
+                        Arc::from(format!("img{i}").as_str()),
+                    ),
+                }],
+                ..Default::default()
+            })
+            .collect();
+        let adapted = adapt_images_for_model(&model, &messages);
+        let sources: Vec<&str> = adapted
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::Image { source } => Some(source.data.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sources.len(), MAX_IMAGES_PER_REQUEST, "cap honored exactly");
+        assert!(sources.iter().take(31).all(|s| !s.contains("31")));
+        assert!(sources.contains(&"img32"));
+        assert!(!sources.contains(&"img31"));
+        let truncated: usize = adapted
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::Text { text } if text == IMAGE_TRUNCATED_NOTE))
+            .count();
+        assert_eq!(truncated, 1, "second-most-recent becomes the note");
+    }
+
+    #[test]
+    fn adapt_images_protects_multi_image_latest_message() {
+        let model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
+        // 30 single-image history messages, then a final message with 3 images
+        // (33 total). The 3 latest survive; 3 second-most-recent history images
+        // are demoted to stay under the cap.
+        let mut messages: Vec<Message> = (0..30)
+            .map(|i| Message {
+                role: Role::User,
+                content: vec![ContentBlock::Image {
+                    source: ImageSource::new(
+                        ImageMediaType::Png,
+                        Arc::from(format!("hist{i}").as_str()),
+                    ),
+                }],
+                ..Default::default()
+            })
+            .collect();
+        messages.push(Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Image {
+                    source: ImageSource::new(ImageMediaType::Png, Arc::from("new0")),
+                },
+                ContentBlock::Image {
+                    source: ImageSource::new(ImageMediaType::Png, Arc::from("new1")),
+                },
+                ContentBlock::Image {
+                    source: ImageSource::new(ImageMediaType::Png, Arc::from("new2")),
+                },
+            ],
+            ..Default::default()
+        });
+        let adapted = adapt_images_for_model(&model, &messages);
+        let sources: Vec<&str> = adapted
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::Image { source } => Some(source.data.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sources.len(), MAX_IMAGES_PER_REQUEST, "never exceeds cap");
+        assert!(["new0", "new1", "new2"].iter().all(|n| sources.contains(n)));
+        // Oldest 29 history images survive (hist0..hist28); hist29, the most
+        // recent history image (second-most-recent overall), is demoted.
+        assert!(sources.contains(&"hist28"));
+        assert!(!sources.contains(&"hist29"));
+    }
+
+    #[test]
+    fn adapt_images_keeps_all_images_under_limit() {
+        let model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
+        let messages: Vec<Message> = (0..MAX_IMAGES_PER_REQUEST)
+            .map(|i| Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: format!("t{i}"),
+                        content: "[image: pic.png 1KB]".into(),
+                        is_error: false,
+                    },
+                    ContentBlock::Image {
+                        source: ImageSource::new(ImageMediaType::Png, Arc::from("abc")),
+                    },
+                ],
+                ..Default::default()
+            })
+            .collect();
+        assert!(matches!(
+            adapt_images_for_model(&model, &messages),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]
