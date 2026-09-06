@@ -1119,6 +1119,10 @@ pub struct SubagentInfo {
     /// the parent's settings.
     #[serde(skip)]
     pub opts: Option<RequestOptions>,
+    /// Outlives the turn that spawned it (a background task): the UI must not
+    /// terminalize its chat at turn end.
+    #[serde(rename = "parent_detached", skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
     #[serde(skip)]
     pub answer_tx: Option<flume::Sender<String>>,
     /// Where a host queues messages for this subagent. Its loop drains the

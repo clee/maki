@@ -391,6 +391,10 @@ pub struct ToolContext {
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
     pub opts: RequestOptions,
     pub subagent_cancels: Arc<CancelMap<String>>,
+    /// Registrations of sessions that outlive the run (`detached`). The run
+    /// map is swept at every run end; this one survives until the loop
+    /// itself is done, and stays routable for a user cancel.
+    pub detached_cancels: Arc<CancelMap<String>>,
     /// Shared with the run that spawned this tool, so a subagent's spend lands
     /// in the parent turn's totals.
     pub ledger: Arc<RunLedger>,
@@ -625,6 +629,7 @@ pub fn interpreter_ctx(
         prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
         opts: RequestOptions::default(),
         subagent_cancels: Arc::new(CancelMap::new()),
+        detached_cancels: Arc::new(CancelMap::new()),
         ledger: Arc::default(),
         registry,
         workflow: false,

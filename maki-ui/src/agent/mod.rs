@@ -45,6 +45,7 @@ pub(crate) struct AgentHandles {
     pub(crate) timeouts: maki_providers::Timeouts,
     cancels: Arc<RunCancels>,
     subagent_cancels: Arc<CancelMap<String>>,
+    detached_cancels: Arc<CancelMap<String>>,
     model_policy: Arc<ModelPolicy>,
     mailbox: SessionMailbox,
     task: smol::Task<()>,
@@ -105,14 +106,25 @@ impl AgentHandles {
         self.cancels.cancel(run_id);
     }
 
-    pub(crate) fn cancel_subagent(&self, tool_use_id: String) {
-        self.subagent_cancels.cancel(tool_use_id);
+    pub(crate) fn cancel_subagent(&self, tool_use_id: String, detached: bool) {
+        // Route to the exact map: `cancel` on an unknown id leaves a sticky
+        // mark there, and the ids are disjoint (synthetic `session-*` only
+        // ever registers in the detached map), so guessing would poison the
+        // wrong one.
+        if detached {
+            self.detached_cancels.cancel(tool_use_id);
+        } else {
+            self.subagent_cancels.cancel(tool_use_id);
+        }
     }
 
-    /// Respawn or shutdown: this loop is done, whatever it was in the middle of.
+    /// Respawn or shutdown: this loop is done, whatever it was in the middle
+    /// of — including its detached background tasks, which outlive runs,
+    /// not loops.
     pub(crate) fn cancel_all(&self) {
         self.cancels.cancel_all();
         self.subagent_cancels.cancel_all();
+        self.detached_cancels.cancel_all();
     }
 
     pub(crate) fn send_mcp(&self, cmd: McpCommand) {
@@ -236,6 +248,7 @@ fn spawn_agent_internal(
     maki_agent::agent::publish_live_history(resumed.id.id(), &shared_history);
     let cancels = RunCancels::new();
     let subagent_cancels: Arc<CancelMap<String>> = Arc::new(CancelMap::new());
+    let detached_cancels: Arc<CancelMap<String>> = Arc::new(CancelMap::new());
     let mailbox = SessionMailbox::register(resumed.id.id());
 
     let agent_loop = AgentLoop::new(
@@ -254,6 +267,7 @@ fn spawn_agent_internal(
         timeouts,
         lua_handle,
         Arc::clone(&subagent_cancels),
+        Arc::clone(&detached_cancels),
         Arc::clone(&model_policy),
     );
 
@@ -270,6 +284,7 @@ fn spawn_agent_internal(
         timeouts,
         cancels,
         subagent_cancels,
+        detached_cancels,
         model_policy,
         mailbox,
         task,

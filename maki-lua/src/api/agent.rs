@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use futures::future::{Either, select};
 use maki_agent::agent::{LoadedInstructions, tool_dispatch};
-use maki_agent::cancel::{CancelMap, CancelSlot};
+use maki_agent::cancel::{CancelMap, CancelSlot, CancelToken, CancelTrigger};
 use maki_agent::tools::interpreter_bridge;
 use maki_agent::tools::registry::ToolRegistry;
 use maki_agent::tools::schema::sanitize_tool_input_schema;
@@ -18,9 +18,9 @@ use maki_agent::tools::{
 };
 use maki_agent::{
     Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, DoneReason,
-    EMPTY_RESPONSE_MARKER, EventSender, EventStreamGuard, History, InputSource, McpSession,
-    RunContext, RunContextBuilder, RunLedger, SessionEvents, SubagentInbox, SubagentInfo,
-    ToolDoneEvent, event_stream,
+    EMPTY_RESPONSE_MARKER, Envelope, EventSender, EventStreamGuard, History, InputSource, 
+    McpSession, RunContext, RunContextBuilder, RunLedger, SessionEvents,
+    SubagentInbox, SubagentInfo, ToolDoneEvent, event_stream,
 };
 use maki_lua_macro::{lua_class, lua_fn, lua_table};
 use maki_providers::model::ModelTier;
@@ -75,6 +75,47 @@ fn model_to_lua_table(lua: &Lua, model: &Model) -> LuaResult<Table> {
     tbl.set("provider", model.provider.to_string())?;
     tbl.set("spec", model.spec())?;
     Ok(tbl)
+}
+
+/// A detached session must not die with the turn that spawned it: the UI
+/// drops the turn's cancel trigger at the end of every run, and a child
+/// token would fire with it.
+fn spawn_cancel(parent: &CancelToken, detached: bool) -> (CancelTrigger, CancelToken) {
+    if detached {
+        CancelToken::new()
+    } else {
+        parent.child()
+    }
+}
+
+/// Which map a child's trigger registers in: the run's, swept at every run
+/// end (`AgentLoop::process_run`), or the loop-scoped detached map that
+/// outlives the sweep and stays routable for a user cancel. Returns the slot
+/// and the map to retire from on close.
+fn register_session_cancel(
+    run: &Arc<CancelMap<String>>,
+    detached: &Arc<CancelMap<String>>,
+    ui_id: String,
+    trigger: CancelTrigger,
+    is_detached: bool,
+) -> (CancelSlot, Arc<CancelMap<String>>) {
+    let map = if is_detached {
+        Arc::clone(detached)
+    } else {
+        Arc::clone(run)
+    };
+    let slot = map.insert(ui_id, trigger);
+    (slot, map)
+}
+
+/// A detached session gets its own synthetic id: reusing the tool call's id
+/// would tie the chat's lifecycle to a ToolDone that lands while the
+/// detached session is still running.
+fn session_ui_id(tool_use_id: Option<&str>, detached: bool) -> String {
+    match (detached, tool_use_id) {
+        (false, Some(id)) => id.to_owned(),
+        _ => format!("session-{}", MakiId::generate()),
+    }
 }
 
 fn dispatch_ctx<'a>(ctx: &'a LuaCtx, method: &str) -> Result<&'a AgentContext, String> {
@@ -445,6 +486,9 @@ async fn call_tool(
 ///     `"max"`), or a budget integer (token count). Inherits the parent
 ///     setting if omitted, and is capped at it otherwise.
 ///   `fast` (boolean?) - use fast mode. Inherits parent setting if omitted.
+///   `detached` (boolean?) - outlive the spawning turn: the session is not
+///     cancelled when that turn ends, and it shows up in the task list under
+///     its own synthetic id instead of the tool call's. Default: `false`.
 /// @return (Session?, string?) Session handle, or `(nil, err)` on failure.
 /// @example
 /// local tools = maki.agent.tools(ctx, { audience = "general_sub" })
@@ -483,6 +527,7 @@ async fn session(
         .get::<Option<bool>>("fast")?
         .unwrap_or(agent_ctx.opts.fast);
     let mcp_enabled: bool = opts.get::<Option<bool>>("mcp")?.unwrap_or(true);
+    let detached: bool = opts.get::<Option<bool>>("detached")?.unwrap_or(false);
 
     let (model, provider): (Model, Arc<dyn provider::Provider>) = if let Some(ref spec) = model_spec
     {
@@ -594,20 +639,21 @@ async fn session(
     .detach();
 
     // Doubles as the task id tools see. The fallback gets its own id: it keys
-    // `subagent_cancels`, where two subagents sharing the session id would
+    // the cancel maps, where two subagents sharing the session id would
     // collide.
-    let ui_id = agent_ctx
-        .tool_use_id
-        .clone()
-        .unwrap_or_else(|| format!("session-{}", MakiId::generate()));
+    let ui_id = session_ui_id(agent_ctx.tool_use_id.as_deref(), detached);
     // Registered before the session runs so the child token does not fire
     // on drop and kill the subagent at birth.
-    let (child_trigger, child_cancel) = agent_ctx.cancel.child();
+    let (child_trigger, child_cancel) = spawn_cancel(&agent_ctx.cancel, detached);
     // Several sessions can share one `ui_id`, so keep the slot and retire
     // only ours on close instead of clearing the whole key.
-    let cancel_slot = agent_ctx
-        .subagent_cancels
-        .insert(ui_id.clone(), child_trigger);
+    let (cancel_slot, parent_cancels) = register_session_cancel(
+        &agent_ctx.subagent_cancels,
+        &agent_ctx.detached_cancels,
+        ui_id.clone(),
+        child_trigger,
+        detached,
+    );
 
     let name = name.unwrap_or_default();
     info!(name = %name, model = %model.id, "subagent session opened");
@@ -638,6 +684,9 @@ async fn session(
             file_access: Arc::clone(&agent_ctx.file_access),
             prompt_slots: Arc::clone(&agent_ctx.prompt_slots),
             subagent_cancels: Arc::new(CancelMap::new()),
+            // Shared with the loop, not fresh: a nested detached session has
+            // to dodge every run-end sweep and stay cancellable by id too.
+            detached_cancels: Arc::clone(&agent_ctx.detached_cancels),
             ledger: RunLedger::child(&agent_ctx.ledger),
             registry: Arc::clone(maki_agent::tools::ToolRegistry::global_arc()),
             audience,
@@ -660,7 +709,7 @@ async fn session(
         answer_tx: Some(answer_tx),
         reauth: agent_ctx.reauth,
         inbox: Arc::new(SubagentInbox::default()),
-        parent_cancels: Arc::clone(&agent_ctx.subagent_cancels),
+        parent_cancels,
         ui_id,
         cancel_slot,
         parent_event_tx: parent_tx,
@@ -670,6 +719,7 @@ async fn session(
         usage: TokenUsage::default(),
         usage_rx,
         start: Instant::now(),
+        detached,
         closed: false,
     };
 
@@ -806,6 +856,7 @@ struct SessionState {
     usage: TokenUsage,
     usage_rx: flume::Receiver<TokenUsage>,
     start: Instant,
+    detached: bool,
     closed: bool,
 }
 
@@ -818,9 +869,15 @@ impl SessionState {
         self.stream_guard.take();
         self.parent_cancels.retire(&self.ui_id, self.cancel_slot);
         let messages = std::mem::replace(&mut self.history, History::new(Vec::new())).into_vec();
-        let _ = self.parent_event_tx.send(AgentEvent::SubagentHistory {
-            tool_use_id: self.ui_id.clone(),
-            messages,
+        // The subagent stamp lets this land past the stale run_id drop in
+        // the UI: a detached session closes after its spawning run ended.
+        let _ = self.parent_event_tx.send_envelope(Envelope {
+            event: AgentEvent::SubagentHistory {
+                tool_use_id: self.ui_id.clone(),
+                messages,
+            },
+            subagent: self.subagent_info.get().cloned(),
+            run_id: self.parent_event_tx.run_id(),
         });
         info!(
             name = %self.name,
@@ -888,6 +945,7 @@ async fn prompt(
             prompt: Some(message.clone()),
             model: Some(s.params.model.spec()),
             opts: Some(s.opts),
+            detached: s.detached,
             answer_tx: s.answer_tx.take(),
             inbox: Some(Arc::clone(&s.inbox)),
         });
@@ -996,6 +1054,19 @@ async fn prompt(
     Ok((Some(tbl), None))
 }
 
+/// The stable id of this session's chat. `maki.task.list()`,
+/// `maki.task.focus()`, and the `TaskStatusChanged` autocmd all address the
+/// subagent's chat by this id. It is the tool call's id for attached
+/// sessions, a synthetic `session-*` id for detached ones.
+///
+/// @return (string)
+#[lua_fn]
+async fn id(_lua: Lua, this: mlua::UserDataRef<LuaSession>) -> LuaResult<String> {
+    let inner = Arc::clone(&this.inner);
+    drop(this);
+    Ok(inner.lock().await.ui_id.clone())
+}
+
 /// Close the session and flush its history back to the parent agent. Calling
 /// it more than once is safe.
 ///
@@ -1023,7 +1094,7 @@ lua_class! {
     /// Always call `:close()` when you are done, on error paths too. The
     /// garbage collector is a fallback that may never run while the VM sits
     /// idle, so a session you only drop can stay open for the rest of the run.
-    "maki.agent.Session" => LuaSession, SESSION_DOCS [prompt, close]
+    "maki.agent.Session" => LuaSession, SESSION_DOCS [prompt, id, close]
 }
 
 /// Weak Lua ref avoids a reference cycle when the session is stored in userdata.
@@ -1108,6 +1179,7 @@ mod tests {
             prompt: None,
             model: None,
             opts: None,
+            detached: false,
             answer_tx: None,
             inbox: None,
         })
@@ -1179,5 +1251,64 @@ mod tests {
                     .as_ref()
                     .is_some_and(|info| info.parent_tool_use_id == PARENT_ID)
         }));
+    }
+
+    #[test]
+    fn attached_session_cancel_cascades_from_parent() {
+        let (parent_trigger, parent) = CancelToken::new();
+        let (_trigger, child) = spawn_cancel(&parent, false);
+        parent_trigger.cancel();
+        smol::block_on(child.cancelled());
+        assert!(child.is_cancelled());
+    }
+
+    /// The turn-end path drops the spawning run's trigger; a detached session
+    /// must still be standing, dying only to its own trigger (user cancel).
+    #[test]
+    fn detached_session_cancel_ignores_parent() {
+        let (parent_trigger, parent) = CancelToken::new();
+        let (trigger, child) = spawn_cancel(&parent, true);
+        parent_trigger.cancel();
+        assert!(!child.is_cancelled());
+        trigger.cancel();
+        assert!(child.is_cancelled());
+    }
+
+    /// `AgentLoop::process_run` sweeps the run map at every run end. A
+    /// detached session registered there would die with the turn; it must
+    /// land in the loop map the sweep leaves alone.
+    #[test_case::test_case(true; "detached_survives_the_run_sweep")]
+    #[test_case::test_case(false; "attached_dies_with_the_run")]
+    fn run_sweep_reaches_only_attached(is_detached: bool) {
+        const OWNED: &str = "the trigger registers in the right map";
+        const NO_LEAK: &str = "each map holds only its own registrations";
+        let run: Arc<CancelMap<String>> = Arc::default();
+        let loop_map: Arc<CancelMap<String>> = Arc::default();
+        let (trigger, token) = CancelToken::new();
+
+        let (_slot, registry) =
+            register_session_cancel(&run, &loop_map, "some-id".into(), trigger, is_detached);
+        assert_eq!(Arc::ptr_eq(&registry, &loop_map), is_detached, "{OWNED}");
+        assert_eq!(run.is_empty(), is_detached, "{NO_LEAK}");
+        assert_eq!(loop_map.is_empty(), !is_detached, "{NO_LEAK}");
+
+        run.cancel_all();
+        assert_eq!(
+            token.is_cancelled(),
+            !is_detached,
+            "only the run map is swept at run end"
+        );
+    }
+
+    #[test]
+    fn attached_session_reuses_tool_call_id() {
+        assert_eq!(session_ui_id(Some("toolu_1"), false), "toolu_1");
+    }
+
+    #[test_case::test_case(false; "attached_without_tool_call")]
+    #[test_case::test_case(true; "detached_never_reuses_tool_call_id")]
+    fn synthetic_session_ui_id(detached: bool) {
+        let id = session_ui_id(Some("toolu_1").filter(|_| detached), detached);
+        assert!(id.starts_with("session-"), "got: {id}");
     }
 }

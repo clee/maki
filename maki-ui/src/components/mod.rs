@@ -195,6 +195,7 @@ pub enum Action {
     },
     CancelSubagent {
         tool_use_id: String,
+        detached: bool,
     },
     /// The history under this runtime changed (reset, load, rewind), so the
     /// agent has to be respawned on it.

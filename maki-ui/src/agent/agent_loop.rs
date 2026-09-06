@@ -65,6 +65,7 @@ pub(super) struct AgentLoop {
     timeouts: maki_providers::Timeouts,
     lua_handle: EventHandle,
     subagent_cancels: Arc<CancelMap<String>>,
+    detached_cancels: Arc<CancelMap<String>>,
     model_policy: Arc<ModelPolicy>,
 }
 
@@ -86,6 +87,7 @@ impl AgentLoop {
         timeouts: maki_providers::Timeouts,
         lua_handle: EventHandle,
         subagent_cancels: Arc<CancelMap<String>>,
+        detached_cancels: Arc<CancelMap<String>>,
         model_policy: Arc<ModelPolicy>,
     ) -> Self {
         let mcp = mcp_handle.map(|h| McpSession::new(h, &resumed.history));
@@ -111,6 +113,7 @@ impl AgentLoop {
             timeouts,
             lua_handle,
             subagent_cancels,
+            detached_cancels,
             model_policy,
         }
     }
@@ -142,7 +145,8 @@ impl AgentLoop {
         let result = self.dispatch_run(run, run_id, live.token()).await;
         // A `tool_use_id` only names work inside the run that issued the call,
         // so the run ending is what stops whatever still hangs off one, rather
-        // than a group emptying out.
+        // than a group emptying out. Detached sessions register in
+        // `detached_cancels` and outlive the sweep by design.
         self.subagent_cancels.cancel_all();
 
         // A cancel arrives here as `Ok`, since esc is what the user asked for.
@@ -329,6 +333,7 @@ impl AgentLoop {
                 file_access: Arc::clone(&self.file_access),
                 prompt_slots: Arc::clone(&prompt_slots),
                 subagent_cancels: Arc::clone(&self.subagent_cancels),
+                detached_cancels: Arc::clone(&self.detached_cancels),
                 ledger: Arc::new(RunLedger::default()),
                 registry: Arc::clone(maki_agent::tools::ToolRegistry::global_arc()),
                 audience: ToolAudience::MAIN,

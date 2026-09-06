@@ -1690,8 +1690,13 @@ impl<'t> EventLoop<'t> {
                 rt.notifications.reset();
                 rt.handles.cancel_run(run_id);
             }
-            Action::CancelSubagent { tool_use_id } => {
-                self.sessions[idx].handles.cancel_subagent(tool_use_id);
+            Action::CancelSubagent {
+                tool_use_id,
+                detached,
+            } => {
+                self.sessions[idx]
+                    .handles
+                    .cancel_subagent(tool_use_id, detached);
             }
             Action::RestartAgent(history) => self.respawn_agent(idx, history),
             Action::ChangeModel(spec) => {

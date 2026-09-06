@@ -72,6 +72,9 @@ pub struct Chat {
     pub(crate) inbox: Option<Arc<SubagentInbox>>,
     /// Parked while another chat is in front, see `App::set_active_chat`.
     pub(crate) draft: Submission,
+    /// A detached (background) subagent chat outlives the turn that spawned
+    /// it, so turn-end terminalization must leave it alone.
+    pub detached: bool,
     pending_turn_usage: Option<String>,
     messages_panel: MessagesPanel,
     /// The ending and the index of the bubble announcing it, so a later, better
@@ -104,6 +107,7 @@ impl Chat {
             pending_turn_usage: None,
             messages_panel,
             finish: None,
+            detached: false,
         }
     }
 

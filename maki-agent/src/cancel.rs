@@ -194,6 +194,10 @@ impl<K: Eq + std::hash::Hash> CancelMap<K> {
         self.lock().clear();
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
     #[cfg(test)]
     fn has_key(&self, id: &K) -> bool {
         self.lock().contains_key(id)

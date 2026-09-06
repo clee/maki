@@ -1484,6 +1484,7 @@ mod tests {
             prompt: None,
             model: None,
             opts: None,
+            detached: false,
             answer_tx,
             inbox: None,
         }
