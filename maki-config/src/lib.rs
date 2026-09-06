@@ -87,6 +87,7 @@ pub const MIN_RETRY_BASE_MS: u64 = 1;
 pub const MIN_RETRY_MAX_MS: u64 = 1;
 
 pub const DEFAULT_BUILTINS: &[&str] = &[
+    "background",
     "bash",
     "batch",
     "code_execution",
