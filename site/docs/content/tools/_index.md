@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Maki ships with 21 built-in tools in this reference (20 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
+Maki ships with 23 built-in tools in this reference (22 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
 
 ## File Operations
 
@@ -174,6 +174,25 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 | `output_schema` | string | no | JSON Schema (object) the subagent's final result must match. When set, the result is returned as a validated JSON string. |
 | `prompt` | string | yes | Detailed task prompt for the agent |
 | `subagent_type` | string | no | Subagent type: "research" (read-only, default) or "general" (can modify files) |
+
+### `background_task` {#background_task}
+
+Launch an autonomous subagent that runs in the background while the conversation continues.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `description` | string | yes | Short (3-5 words) description of the task |
+| `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier):<br>- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.<br>- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.<br>- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits. |
+| `prompt` | string | yes | Detailed task prompt for the agent |
+| `subagent_type` | string | no | Subagent type: "research" (read-only, default) or "general" (can modify files) |
+
+### `background_result` {#background_result}
+
+Read the status or full result of a background task started with background_task.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Task id returned by background_task |
 
 ### `todo_write` {#todo_write}
 

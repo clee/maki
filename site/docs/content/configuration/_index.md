@@ -217,6 +217,12 @@ maki.setup({
 })
 ```
 
+### `plugins.background`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_concurrent` | integer | `4` | 1 | Max concurrently running background subagents. |
+
 ### `plugins.bash`
 
 | Field | Type | Default | Min | Description |

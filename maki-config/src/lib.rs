@@ -58,6 +58,7 @@ pub const MIN_LOW_SPEED_TIMEOUT_SECS: u64 = 1;
 pub const MIN_STREAM_TIMEOUT_SECS: u64 = 10;
 
 pub const DEFAULT_BUILTINS: &[&str] = &[
+    "background",
     "bash",
     "batch",
     "code_execution",
