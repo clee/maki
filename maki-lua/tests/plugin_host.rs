@@ -5883,6 +5883,42 @@ fn session_close_idempotent_and_prompt_after_close_errors() {
     assert_eq!(out, SESSION_CLOSED_ERR);
 }
 
+/// A detached session never reuses the tool call's id: that id's ToolDone
+/// closes its chat while the background run is still going.
+#[test_case::test_case(false ; "attached_reuses_tool_call_id")]
+#[test_case::test_case(true ; "detached_gets_synthetic_id")]
+fn session_id_from_lua(detached: bool) {
+    const TOOL_CALL_ID: &str = "toolu_bg1";
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let src = format!(
+        r#"maki.api.register_tool({{
+            name = "session_id_probe",
+            description = "test",
+            schema = {MINIMAL_SCHEMA},
+            audiences = {{ "main" }},
+            handler = function(input, ctx)
+                local sess, err = maki.agent.session(ctx, {{ detached = {detached} }})
+                if sess == nil then return "error: " .. err end
+                local id = sess:id()
+                sess:close()
+                return id
+            end
+        }})"#
+    );
+    host.load_source("session_id_plugin", &src).unwrap();
+    let (ctx, _rx) = warm_ctx(TOOL_CALL_ID);
+    let out = exec_warm_tool(&reg, "session_id_probe", &ctx).unwrap();
+    let maki_agent::ToolOutput::Plain(s) = out else {
+        panic!("unexpected output: {out:?}");
+    };
+    if detached {
+        assert!(s.text.starts_with("session-"), "got: {}", s.text);
+    } else {
+        assert_eq!(s.text, TOOL_CALL_ID);
+    }
+}
+
 #[test_case::test_case("{ audience = 'wurkflow' }", "unknown audience: wurkflow" ; "unknown_audience")]
 #[test_case::test_case("{ local_tools = { foo = { handler = function() return '' end } } }", "local_tools.foo: 'description' is required" ; "local_tool_missing_description")]
 #[test_case::test_case("{ local_tools = { foo = { description = 'd' } } }", "local_tools.foo: 'handler' is required" ; "local_tool_missing_handler")]

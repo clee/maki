@@ -51,6 +51,9 @@ pub struct Chat {
     pub cost: Option<f64>,
     pub context_size: u32,
     pub model_id: Option<String>,
+    /// A detached (background) subagent chat outlives the turn that spawned
+    /// it, so turn-end terminalization must leave it alone.
+    pub detached: bool,
     pending_turn_usage: Option<String>,
     messages_panel: MessagesPanel,
     /// The ending and the index of the bubble announcing it, so a later, better
@@ -72,6 +75,7 @@ impl Chat {
             messages_panel: MessagesPanel::new(ui_config, lua_event_handle),
             finish: None,
             task_id: None,
+            detached: false,
         }
     }
 

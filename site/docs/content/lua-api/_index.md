@@ -1266,6 +1266,9 @@ and tool set.
     `"max"`), or a budget integer (token count). Inherits parent setting
     if omitted.
   - `fast` (`boolean?`) use fast mode. Inherits parent setting if omitted.
+  - `detached` (`boolean?`) outlive the spawning turn: the session is not
+    cancelled when that turn ends, and it shows up in the task list under
+    its own synthetic id instead of the tool call's. Default: `false`.
 
 **Returns:** ([`Session?`](#maki-agent-Session), `string?`) Session handle, or `(nil, err)` on failure.
 
@@ -1332,6 +1335,21 @@ if err then error(err) end
 print(r.text)
 print(r.input_tokens .. " input, " .. r.output_tokens .. " output tokens")
 ```
+
+---
+
+### `Session:id()` {#Session-id}
+
+```lua
+Session:id()
+```
+
+The stable id of this session's chat. `maki.task.list()`,
+`maki.task.focus()`, and the `TaskStatusChanged` autocmd all address the
+subagent's chat by this id. It is the tool call's id for attached
+sessions, a synthetic `session-*` id for detached ones.
+
+**Returns:** (`string`)
 
 ---
 

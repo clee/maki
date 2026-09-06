@@ -1022,6 +1022,7 @@ mod tests {
                     name: SUBAGENT_NAME.to_owned(),
                     prompt: None,
                     model: None,
+                    detached: false,
                     answer_tx: None,
                 }),
                 run_id: 0,

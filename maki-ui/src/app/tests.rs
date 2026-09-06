@@ -251,6 +251,7 @@ fn subagent_info_with_tx(
         name: name.into(),
         prompt: None,
         model: None,
+        detached: false,
         answer_tx,
     }
 }
@@ -2348,6 +2349,101 @@ fn stale_events_ignored_after_run_id_increment() {
     ));
     app.chats[0].flush();
     assert_eq!(app.chats[0].last_message_text(), "new text");
+}
+
+const BG_ID: &str = "session-bg1";
+const BG_NAME: &str = "background";
+const BG_TEXT: &str = "bg work";
+const BG_TEXT_2: &str = "more bg";
+
+fn detached_msg(event: AgentEvent, run_id: u64) -> Msg {
+    let info = SubagentInfo {
+        detached: true,
+        ..subagent_info(BG_ID, BG_NAME)
+    };
+    Msg::Agent(Box::new(Envelope {
+        event,
+        subagent: Some(info),
+        run_id,
+    }))
+}
+
+fn detached_delta(text: &str, run_id: u64) -> Msg {
+    detached_msg(AgentEvent::TextDelta { text: text.into() }, run_id)
+}
+
+/// A background task reports after the run that spawned it ended: the stale
+/// run_id drop is for the main chat, and a subagent-stamped envelope
+/// addresses its own chat by stable id instead.
+#[test]
+fn detached_subagent_events_survive_stale_run_id() {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    app.update(detached_delta(BG_TEXT, 1));
+    assert_eq!(app.chats.len(), 2);
+    assert!(app.chats[1].detached);
+    app.chats[1].flush();
+    assert_eq!(app.chats[1].last_message_text(), BG_TEXT);
+
+    // The spawning run ends; the id moves on and the routing cache empties.
+    app.run_id = 2;
+    app.chat_index.clear();
+
+    app.update(detached_delta(BG_TEXT_2, 1));
+    assert_eq!(app.chats.len(), 2, "no duplicate chat for a known id");
+    app.chats[1].flush();
+    assert_eq!(app.chats[1].last_message_text(), BG_TEXT_2);
+}
+
+/// Turn end terminalizes in-flight subagents, but a detached chat is still
+/// running by design and must carry over untouched.
+#[test]
+fn turn_end_leaves_detached_chat_running() {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    app.update(detached_delta(BG_TEXT, 1));
+    app.update(subagent_msg(
+        AgentEvent::TextDelta { text: "attached".into() },
+        TASK_ID,
+        Some("attached"),
+    ));
+    assert_eq!(app.chats.len(), 3);
+
+    end_turn(&mut app);
+
+    assert!(!app.chats[1].is_finished(), "detached chat keeps running");
+    assert!(app.chats[2].is_finished(), "attached chat terminalized");
+}
+
+/// The transcript close of a background task lands after its spawning run
+/// ended, with the routing cache already wiped.
+#[test]
+fn subagent_history_lands_after_turn_end() {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    app.update(detached_delta(BG_TEXT, 1));
+    app.run_id = 2;
+    app.chat_index.clear();
+
+    app.update(detached_msg(
+        AgentEvent::SubagentHistory {
+            tool_use_id: BG_ID.into(),
+            messages: vec![],
+        },
+        1,
+    ));
+
+    assert!(app.chats[1].is_finished());
+    assert!(
+        app.state
+            .session
+            .subagent_messages()
+            .contains_key(BG_ID),
+        "transcript must be stored for restore"
+    );
 }
 
 #[test]

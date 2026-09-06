@@ -1000,6 +1000,10 @@ pub struct SubagentInfo {
     pub prompt: Option<String>,
     #[serde(rename = "parent_model", skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Outlives the turn that spawned it (a background task): the UI must not
+    /// terminalize its chat at turn end.
+    #[serde(rename = "parent_detached", skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
     #[serde(skip)]
     pub answer_tx: Option<flume::Sender<String>>,
 }

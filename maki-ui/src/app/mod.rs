@@ -1095,7 +1095,10 @@ impl App {
             }
             return vec![];
         }
-        if envelope.run_id != self.run_id {
+        // Subagent-stamped events address their own chat by stable id, not
+        // the run: a detached (background) subagent must keep reporting after
+        // its spawning run ended and the id bumped.
+        if envelope.run_id != self.run_id && envelope.subagent.is_none() {
             // A snapshot dropped here degrades the tool body to llm_output.
             if let AgentEvent::ToolSnapshot { id, .. }
             | AgentEvent::ToolHeaderSnapshot { id, .. }
@@ -1120,7 +1123,7 @@ impl App {
             // so we finish them here on SubagentHistory. This event only knows
             // that the transcript closed, so say Unknown and leave the verdict
             // to the ToolDone that follows elsewhere.
-            if let Some(&sub_idx) = self.chat_index.get(tool_use_id.as_str()) {
+            if let Some(sub_idx) = self.chat_idx_by_id(&tool_use_id) {
                 self.chats[sub_idx].mark_finished(TaskOutcome::Unknown, DONE_TEXT);
             }
             self.state
@@ -1271,9 +1274,22 @@ impl App {
         vec![]
     }
 
+    /// `chat_index` is wiped at every turn end, but a detached subagent keeps
+    /// reporting past that. The chats themselves hold the stable ids, so
+    /// re-register from them instead of opening a duplicate chat.
+    fn chat_idx_by_id(&self, id: &str) -> Option<usize> {
+        if let Some(&idx) = self.chat_index.get(id) {
+            return Some(idx);
+        }
+        self.chats
+            .iter()
+            .position(|chat| chat.task_id().is_some_and(|tid| &**tid == id))
+    }
+
     fn resolve_or_create_chat(&mut self, subagent: &SubagentInfo) -> usize {
         let id = &subagent.parent_tool_use_id;
-        if let Some(&idx) = self.chat_index.get(id.as_str()) {
+        if let Some(idx) = self.chat_idx_by_id(id) {
+            self.chat_index.insert(id.clone(), idx);
             return idx;
         }
         let idx = self.chats.len();
@@ -1293,6 +1309,7 @@ impl App {
         );
         chat.set_restore_channel(self.restore_event_tx.clone());
         chat.model_id = subagent.model.clone();
+        chat.detached = subagent.detached;
         if let Some(ref prompt) = subagent.prompt {
             chat.push_user_message(prompt);
         }
@@ -1725,16 +1742,19 @@ impl App {
         self.retain_resolved_subagents(TaskOutcome::Error, ERROR_TEXT);
         self.chats[0].fail_in_progress_except(message.into(), self.shell.active_ids());
         for chat in self.chats.iter_mut().skip(1) {
-            chat.fail_in_progress_with_message(message.into());
+            if !chat.detached {
+                chat.fail_in_progress_with_message(message.into());
+            }
         }
     }
 
     /// Marks unfinished subagent chats as ended and drops them from
     /// `chat_index`, so the session records only the children that really
-    /// completed.
+    /// completed. Detached chats are still running by design, so they carry
+    /// over untouched.
     fn retain_resolved_subagents(&mut self, outcome: TaskOutcome, text: &str) {
         self.chat_index.retain(|_, &mut sub_idx| {
-            if self.chats[sub_idx].is_finished() {
+            if self.chats[sub_idx].is_finished() || self.chats[sub_idx].detached {
                 true
             } else {
                 self.chats[sub_idx].mark_finished(outcome, text);
