@@ -7526,6 +7526,7 @@ fn handed_over_history(
                 AgentEvent::SubagentHistory {
                     tool_use_id,
                     messages,
+                    failed: _,
                 } if tool_use_id == id => Some(messages),
                 _ => None,
             },
