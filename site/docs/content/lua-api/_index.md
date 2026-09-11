@@ -2621,10 +2621,10 @@ if err then return end
 ### `maki.fs.read()` {#maki-fs-read}
 
 ```lua
-maki.fs.read({path})
+maki.fs.read({path}, {opts?})
 ```
 
-Read the entire file at {path} as a UTF-8 string.
+Read the file at {path} as a UTF-8 string.
 Files over 512 MiB or not valid UTF-8 return nil plus an error message.
 Use `read_bytes` for binary files.
 
@@ -2633,17 +2633,26 @@ Requires the `fs_read` [plugin permission](#plugin-permissions).
 **Parameters:**
 
 - `{path}` (`string`) Absolute or relative file path. `~/` is expanded to the home directory.
+- `{opts?}` (`table?`) `{ offset = integer, len = integer }` window to read. A negative
+
+  `offset` counts back from the end of the file, so `{ offset = -1024 }` reads the
+
+
+  last 1024 bytes, and `len` caps how many bytes are read from `offset`. A window
+
+
+  that splits a multibyte character replaces the broken sequence. Omit `opts` to
+
+
+  read the whole file.
+
 
 **Returns:** (`string?`, `string?`) File contents, or nil plus an error message.
 
 **Example:**
 
 ```lua
-local text, err = maki.fs.read("config.toml")
-if err then
-  maki.log.warn("could not read config: " .. err)
-  return
-end
+local tail = maki.fs.read("server.log", { offset = -4096 })
 ```
 
 ---
