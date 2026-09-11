@@ -1806,7 +1806,8 @@ maki.async.sleep({ms})
 ```
 
 Suspend the calling task for {ms} milliseconds. Other tasks and the UI
-keep running, and a cancel still lands while you sleep.
+keep running, and a cancel still lands while you sleep: the timer races
+the owning task's cancel token.
 
 All plugins share one Lua thread. Code that runs for 5 seconds without
 yielding is stopped with an error. `sleep(0)` lets every other ready
@@ -1818,14 +1819,14 @@ dismisses itself, use `maki.defer_fn`.
 
 **Parameters:**
 
-- `{ms}` (`integer`) Milliseconds to sleep. Zero only yields.
+- `{ms}` (`integer`) Milliseconds to wait. Must be >= 0. Zero only yields.
 
 **Example:**
 
 ```lua
 maki.async.run(function()
-  maki.async.sleep(4000)
-  win:close()
+  maki.async.sleep(250)
+  retry()
 end)
 
 -- A long loop that keeps the rest of maki responsive:
