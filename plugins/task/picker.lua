@@ -9,6 +9,7 @@
 local TextInput = require("maki.text_input")
 local ListPicker = require("maki.list_picker")
 local Rows = require("picker_rows")
+local JobPane = require("maki.job_pane")
 
 local TITLE = " Tasks "
 local FILTER_PREFIX = "❯ "
@@ -263,7 +264,10 @@ local function open_selected()
   end
   local row = board.rows[Rows.index_of(board.rows, board.sel_id)]
   if not row.task then
-    maki.ui.flash("a job has no transcript to open")
+    -- The pane floats over the picker and takes focus; on close the float
+    -- manager refocuses the topmost window left, which is this picker, so it
+    -- just resumes its loop with the selection intact.
+    JobPane.open(row.job)
     return
   end
   local _, err = maki.task.focus(board.sel_id)

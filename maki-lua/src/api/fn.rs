@@ -695,12 +695,13 @@ impl JobStore {
         job_id: u32,
         task_id: Option<u64>,
         plugin: &str,
+        session: Option<MakiId>,
         updates: CallbackUpdates,
     ) -> bool {
         let Some(job) = self.jobs.get_mut(&job_id) else {
             return false;
         };
-        if !job.can_access(task_id, plugin) {
+        if !job.can_access_read(task_id, plugin, session) {
             return false;
         }
         if matches!(updates.on_exit, CallbackUpdate::Set(_)) {
@@ -712,9 +713,15 @@ impl JobStore {
         true
     }
 
-    pub fn snapshot(&self, job_id: u32, task_id: Option<u64>, plugin: &str) -> Option<JobSnapshot> {
+    pub fn snapshot(
+        &self,
+        job_id: u32,
+        task_id: Option<u64>,
+        plugin: &str,
+        session: Option<MakiId>,
+    ) -> Option<JobSnapshot> {
         let job = self.jobs.get(&job_id)?;
-        job.can_access(task_id, plugin)
+        job.can_access_read(task_id, plugin, session)
             .then(|| JobSnapshot::from_job(job_id, job, true))
     }
 
@@ -906,6 +913,18 @@ impl JobMeta {
                 ..
             } => owner_plugin.as_ref() == plugin,
         }
+    }
+
+    /// Read paths widen for session-owned jobs: anything running inside that
+    /// session may look, whatever plugin started the job. That is what lets
+    /// the session's UI (the /tasks picker's output pane) stream a monitor
+    /// plugin's job. Mutations keep [`Self::can_access`].
+    fn can_access_read(&self, task_id: Option<u64>, plugin: &str, session: Option<MakiId>) -> bool {
+        self.can_access(task_id, plugin)
+            || matches!(
+                (&self.owner, session),
+                (JobOwner::Session { session: owner, .. }, Some(caller)) if *owner == caller
+            )
     }
 }
 
@@ -1172,16 +1191,29 @@ fn parse_scope(lua: &Lua, plugin: &Arc<str>, scope: Value) -> LuaResult<JobOwner
 /// Snapshot a job this plugin can see. Live jobs report tails collected
 /// so far; session-owned jobs still answer after they exit.
 ///
+/// Session-owned jobs are readable by anything running in that session,
+/// not just the plugin that started them: pass { session } (the id
+/// `maki.session.current()` gives) to read a peer's session job.
+///
 /// @param job_id integer Job id returned by `jobstart`.
+/// @param opts table? `session` (string?) session id widening read access.
 /// @return (table|nil, string|nil) `{ id, command, name, pid, session, status,
 ///   exit_code, elapsed_secs, stdout_lines, stderr_lines }`, or nil and
 ///   an error. `status` is `"running"` or `"exited"`.
 /// @example
 /// local info = maki.fn.jobinfo(id)
 #[lua_fn(guard = Run)]
-fn jobinfo(lua: &Lua, #[ctx] plugin: Arc<str>, job_id: u32) -> LuaResult<Pair<Value>> {
+fn jobinfo(
+    lua: &Lua,
+    #[ctx] plugin: Arc<str>,
+    job_id: u32,
+    opts: Option<Table>,
+) -> LuaResult<Pair<Value>> {
+    let session = opts_session(opts.as_ref())?;
     let task_id = active_task_id(lua);
-    match with_jobs(lua, |store| store.snapshot(job_id, task_id, &plugin)) {
+    match with_jobs(lua, |store| {
+        store.snapshot(job_id, task_id, &plugin, session)
+    }) {
         Some(snap) => Ok((Some(Value::Table(snapshot_table(lua, &snap, true)?)), None)),
         None => Ok(err_pair(JOB_NOT_FOUND_ERR)),
     }
@@ -1197,6 +1229,7 @@ fn jobinfo(lua: &Lua, #[ctx] plugin: Arc<str>, job_id: u32) -> LuaResult<Pair<Va
 ///
 /// @param job_id integer Job id, e.g. from `joblist`.
 /// @param opts table `on_stdout`, `on_stderr`, `on_exit`: a function, or `false` to clear.
+///   `session` (string?) widens access to a peer's session-owned job, as in `jobinfo`.
 /// @return (boolean|nil, string|nil) true on success, or nil and an error.
 /// @example
 /// -- A monitor that survives /reload: adopt the live job or start one.
@@ -1217,6 +1250,7 @@ fn jobattach(
     job_id: u32,
     opts: Table,
 ) -> LuaResult<Pair<bool>> {
+    let session = opts_session(Some(&opts))?;
     let updates = CallbackUpdates {
         on_stdout: callback_update(lua, &opts, "on_stdout")?,
         on_stderr: callback_update(lua, &opts, "on_stderr")?,
@@ -1224,12 +1258,25 @@ fn jobattach(
     };
     let task_id = active_task_id(lua);
     let attached = with_jobs(lua, |store| {
-        store.attach(lua, job_id, task_id, &plugin, updates)
+        store.attach(lua, job_id, task_id, &plugin, session, updates)
     });
     if attached {
         Ok((Some(true), None))
     } else {
         Ok(err_pair(JOB_NOT_FOUND_ERR))
+    }
+}
+
+fn opts_session(opts: Option<&Table>) -> LuaResult<Option<MakiId>> {
+    let Some(opts) = opts else {
+        return Ok(None);
+    };
+    match opts.get::<Option<String>>("session")? {
+        Some(raw) => raw
+            .parse::<MakiId>()
+            .map(Some)
+            .map_err(|e| mlua::Error::runtime(e.to_string())),
+        None => Ok(None),
     }
 }
 
@@ -1365,7 +1412,7 @@ async fn jobwait(
     timeout_ms: Option<u64>,
 ) -> LuaResult<Pair<Table>> {
     let task_id = active_task_id(&lua);
-    if let Some(snap) = with_jobs(&lua, |store| store.snapshot(job_id, task_id, &plugin))
+    if let Some(snap) = with_jobs(&lua, |store| store.snapshot(job_id, task_id, &plugin, None))
         && let Some(code) = snap.exit_code
     {
         return wait_result(
@@ -2000,13 +2047,13 @@ mod tests {
         store.record_event(id, &JobEvent::Stdout("hello".into()));
         store.record_event(id, &JobEvent::Stderr("warn".into()));
 
-        let snap = store.snapshot(id, Some(1), TEST_PLUGIN).unwrap();
+        let snap = store.snapshot(id, Some(1), TEST_PLUGIN, None).unwrap();
         assert_eq!(snap.command, "echo hello");
         assert_eq!(snap.stdout_lines, ["hello"]);
         assert_eq!(snap.stderr_lines, ["warn"]);
         assert!(snap.exit_code.is_none());
-        assert!(store.snapshot(id, Some(2), TEST_PLUGIN).is_none());
-        assert!(store.snapshot(999, Some(1), TEST_PLUGIN).is_none());
+        assert!(store.snapshot(id, Some(2), TEST_PLUGIN, None).is_none());
+        assert!(store.snapshot(999, Some(1), TEST_PLUGIN, None).is_none());
     }
 
     #[test]
@@ -2017,7 +2064,7 @@ mod tests {
         store.record_event(id, &JobEvent::Stdout("a".into()));
         store.record_event(id, &JobEvent::Stdout("b".into()));
         store.record_event(id, &JobEvent::Stdout("c".into()));
-        let snap = store.snapshot(id, Some(1), TEST_PLUGIN).unwrap();
+        let snap = store.snapshot(id, Some(1), TEST_PLUGIN, None).unwrap();
         assert_eq!(snap.stdout_lines, ["b", "c"]);
     }
 
@@ -2052,7 +2099,7 @@ mod tests {
             .map(|s| s.id)
             .collect();
         assert_eq!(live, [plugin]);
-        assert!(store.snapshot(task, Some(1), TEST_PLUGIN).is_none());
+        assert!(store.snapshot(task, Some(1), TEST_PLUGIN, None).is_none());
     }
 
     #[cfg(unix)]
@@ -2079,7 +2126,7 @@ mod tests {
         store.complete(&lua, id, 3);
 
         let snap = store
-            .snapshot(id, None, TEST_PLUGIN)
+            .snapshot(id, None, TEST_PLUGIN, None)
             .expect("peek after exit");
         assert_eq!(snap.exit_code, Some(3));
         assert!(
@@ -2094,7 +2141,7 @@ mod tests {
         );
 
         store.kill_session(&lua, session);
-        assert!(store.snapshot(id, None, TEST_PLUGIN).is_none());
+        assert!(store.snapshot(id, None, TEST_PLUGIN, None).is_none());
     }
 
     #[cfg(unix)]
@@ -2111,8 +2158,8 @@ mod tests {
             .start(JobSpec::new(session_owner(b), "sleep 30"))
             .unwrap();
         store.kill_session(&lua, a);
-        assert!(store.snapshot(first, None, TEST_PLUGIN).is_none());
-        assert!(store.snapshot(second, None, TEST_PLUGIN).is_some());
+        assert!(store.snapshot(first, None, TEST_PLUGIN, None).is_none());
+        assert!(store.snapshot(second, None, TEST_PLUGIN, None).is_some());
         store.kill_session(&lua, b);
     }
 
@@ -2128,14 +2175,20 @@ mod tests {
         store.jobs.insert(1, job);
 
         store.complete(&lua, 1, 0);
-        let at_exit = store.snapshot(1, None, TEST_PLUGIN).unwrap().elapsed_secs;
+        let at_exit = store
+            .snapshot(1, None, TEST_PLUGIN, None)
+            .unwrap()
+            .elapsed_secs;
         assert!(
             at_exit >= PAST_SECS,
             "elapsed at exit should reflect the backdated start, got {at_exit}"
         );
 
         store.jobs.get_mut(&1).unwrap().started = Instant::now();
-        let later = store.snapshot(1, None, TEST_PLUGIN).unwrap().elapsed_secs;
+        let later = store
+            .snapshot(1, None, TEST_PLUGIN, None)
+            .unwrap()
+            .elapsed_secs;
         assert_eq!(later, at_exit, "elapsed must freeze once the job exits");
     }
 
@@ -2208,7 +2261,7 @@ mod tests {
             store.record_event(id, &event);
         }
 
-        let snap = store.snapshot(id, Some(1), TEST_PLUGIN).unwrap();
+        let snap = store.snapshot(id, Some(1), TEST_PLUGIN, None).unwrap();
         assert!(
             snap.stdout_lines.is_empty() && snap.stderr_lines.is_empty(),
             "a redirected stream must not be buffered here"
@@ -2245,7 +2298,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .snapshot(1, None, TEST_PLUGIN)
+                .snapshot(1, None, TEST_PLUGIN, None)
                 .unwrap()
                 .name
                 .as_deref(),
@@ -2263,7 +2316,7 @@ mod tests {
         exited_session_job(&lua, &mut store, CODE);
         let at_exit = store.jobs[&1].elapsed_secs;
 
-        assert!(store.attach(&lua, 1, None, TEST_PLUGIN, exit_updates(&lua)));
+        assert!(store.attach(&lua, 1, None, TEST_PLUGIN, None, exit_updates(&lua)));
 
         let (id, event) = store.next_plugin_event().expect("replayed exit");
         assert_eq!(id, 1);
@@ -2289,13 +2342,59 @@ mod tests {
     }
 
     #[test]
+    fn session_jobs_are_readable_by_peers_in_the_same_session_only() {
+        let lua = Lua::new();
+        let mut store = make_store();
+        let session = MakiId::generate();
+        let other = MakiId::generate();
+        store
+            .jobs
+            .insert(1, stub_job(session_owner(session), None, None));
+
+        const PEER: &str = "other-plugin";
+        assert!(store.snapshot(1, None, PEER, Some(session)).is_some());
+        assert!(store.attach(&lua, 1, None, PEER, Some(session), exit_updates(&lua)));
+
+        assert!(store.snapshot(1, None, PEER, Some(other)).is_none());
+        assert!(store.snapshot(1, None, PEER, None).is_none());
+        assert!(!store.attach(&lua, 1, None, PEER, Some(other), exit_updates(&lua)));
+
+        // A refused attach must not queue a replay.
+        assert!(store.next_plugin_event().is_none());
+    }
+
+    #[test]
+    fn session_read_widening_stays_read_only() {
+        let lua = Lua::new();
+        let mut store = make_store();
+        let session = MakiId::generate();
+        store
+            .jobs
+            .insert(1, stub_job(session_owner(session), None, None));
+        store.jobs.get_mut(&1).unwrap().exit_code = Some(0);
+
+        const PEER: &str = "other-plugin";
+        store.forget(&lua, 1, None, PEER);
+        assert!(
+            store.jobs.contains_key(&1),
+            "a same-session peer must not forget another plugin's job"
+        );
+
+        store.kill(1, None, PEER);
+        assert!(
+            store.jobs.contains_key(&1),
+            "kill only takes the job out via complete/remove, so the gate already refused it"
+        );
+    }
+
+    #[test]
     fn attach_is_refused_for_jobs_this_plugin_cannot_see() {
         let lua = Lua::new();
         let mut store = make_store();
         exited_session_job(&lua, &mut store, 0);
 
-        assert!(!store.attach(&lua, 1, None, "other-plugin", exit_updates(&lua)));
-        assert!(!store.attach(&lua, 999, None, TEST_PLUGIN, exit_updates(&lua)));
+        assert!(!store.attach(&lua, 1, None, "other-plugin", None, exit_updates(&lua)));
+        assert!(!store.attach(&lua, 999, None, TEST_PLUGIN, None, exit_updates(&lua)));
         assert!(
             store.next_plugin_event().is_none(),
             "a refused attach must not queue a replay"
@@ -2315,6 +2414,7 @@ mod tests {
             1,
             None,
             TEST_PLUGIN,
+            None,
             CallbackUpdates {
                 on_stderr: CallbackUpdate::Set(noop_key(&lua)),
                 ..keep_all()
@@ -2331,6 +2431,7 @@ mod tests {
             1,
             None,
             TEST_PLUGIN,
+            None,
             CallbackUpdates {
                 on_stdout: CallbackUpdate::Clear,
                 ..keep_all()
@@ -2357,7 +2458,7 @@ mod tests {
 
         assert_eq!(
             store
-                .snapshot(1, Some(1), TEST_PLUGIN)
+                .snapshot(1, Some(1), TEST_PLUGIN, None)
                 .unwrap()
                 .dropped_output,
             expected
@@ -2387,12 +2488,14 @@ mod tests {
         }
 
         assert!(
-            store.snapshot(QUIET_JOB, None, QUIET_PLUGIN).is_some(),
+            store
+                .snapshot(QUIET_JOB, None, QUIET_PLUGIN, None)
+                .is_some(),
             "a chatty plugin must not evict another plugin's history"
         );
         assert!(
             store
-                .snapshot(OLDEST_CHATTY_JOB, None, TEST_PLUGIN)
+                .snapshot(OLDEST_CHATTY_JOB, None, TEST_PLUGIN, None)
                 .is_none(),
             "the chatty plugin evicts its own oldest job first"
         );
@@ -2417,7 +2520,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .snapshot(id, Some(1), TEST_PLUGIN)
+                .snapshot(id, Some(1), TEST_PLUGIN, None)
                 .unwrap()
                 .stdout_lines,
             ["hello"]
@@ -2443,7 +2546,7 @@ mod tests {
 
         store.forget(&lua, 1, None, TEST_PLUGIN);
         assert!(
-            store.snapshot(1, None, TEST_PLUGIN).is_some(),
+            store.snapshot(1, None, TEST_PLUGIN, None).is_some(),
             "running job must stay"
         );
 
@@ -2457,12 +2560,12 @@ mod tests {
 
         store.forget(&lua, 1, None, "other-plugin");
         assert!(
-            store.snapshot(1, None, TEST_PLUGIN).is_some(),
+            store.snapshot(1, None, TEST_PLUGIN, None).is_some(),
             "other plugin cannot forget"
         );
 
         store.forget(&lua, 1, None, TEST_PLUGIN);
-        assert!(store.snapshot(1, None, TEST_PLUGIN).is_none());
+        assert!(store.snapshot(1, None, TEST_PLUGIN, None).is_none());
         assert!(store.list(Some(session), None, TEST_PLUGIN).is_empty());
     }
 
@@ -2485,7 +2588,7 @@ mod tests {
         store.complete(&lua, id, 0);
         store.kill(id, None, TEST_PLUGIN);
         let snap = store
-            .snapshot(id, None, TEST_PLUGIN)
+            .snapshot(id, None, TEST_PLUGIN, None)
             .expect("exited session job must stay inspectable");
         assert_eq!(snap.exit_code, Some(0));
         assert!(
@@ -2528,7 +2631,7 @@ mod tests {
             serde_json::json!(TEST_SPAWNER)
         );
 
-        let snap = store.snapshot(id, None, TEST_PLUGIN).unwrap();
+        let snap = store.snapshot(id, None, TEST_PLUGIN, Some(session)).unwrap();
         assert_eq!(snap.spawned_by.as_deref(), Some(TEST_SPAWNER));
         store.kill_session(&lua, session);
     }

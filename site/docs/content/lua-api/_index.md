@@ -2430,17 +2430,22 @@ end
 ### `maki.fn.jobinfo()` {#maki-fn-jobinfo}
 
 ```lua
-maki.fn.jobinfo({job_id})
+maki.fn.jobinfo({job_id}, {opts?})
 ```
 
 Snapshot a job this plugin can see. Live jobs report tails collected
 so far; session-owned jobs still answer after they exit.
+
+Session-owned jobs are readable by anything running in that session,
+not just the plugin that started them: pass { session } (the id
+`maki.session.current()` gives) to read a peer's session job.
 
 Requires the `run` [plugin permission](#plugin-permissions).
 
 **Parameters:**
 
 - `{job_id}` (`integer`) Job id returned by `jobstart`.
+- `{opts?}` (`table?`) `session` (string?) session id widening read access.
 
 **Returns:** (`table|nil`, `string|nil`) `{ id, command, name, pid, session, status,
   exit_code, elapsed_secs, stdout_lines, stderr_lines }`, or nil and
@@ -2502,6 +2507,7 @@ Requires the `run` [plugin permission](#plugin-permissions).
 
 - `{job_id}` (`integer`) Job id, e.g. from `joblist`.
 - `{opts}` (`table`) `on_stdout`, `on_stderr`, `on_exit`: a function, or `false` to clear.
+  - `session` (`string?`) widens access to a peer's session-owned job, as in `jobinfo`.
 
 **Returns:** (`boolean|nil`, `string|nil`) true on success, or nil and an error.
 
@@ -7448,6 +7454,35 @@ M.EMPTY_OLD_STRING = "old_string must not be empty"
 -- whitespace and indentation drift. Returns the new content, or nil plus
 -- one of the error constants above.
 function M.replace(content, old_string, new_string, replace_all)
+```
+
+### `require("maki.job_pane")`
+
+```lua
+-- Live read-only output pane for a command job, opened over whatever float
+-- is showing (the /tasks picker, usually). Streams via jobattach; Esc closes
+-- and detaches. Any picker can reuse it: `JobPane.open(job)` with a joblist
+-- row.
+JobPane.MAX_LINES = MAX_LINES
+JobPane.KEEP_LINES = KEEP_LINES
+
+-- One output line as spans: the stream tag carries the style, the text stays
+-- plain. Theme roles only.
+function JobPane.stream_line(kind, text)
+function JobPane.exit_line(code)
+
+-- The pane's starting content: the dropped note, then the tails, then the
+-- exit line for a job that already finished.
+function JobPane.initial_lines(info)
+
+-- Last KEEP_LINES of {lines} once it outgrows MAX_LINES, else nil (nothing to
+-- do).
+function JobPane.capped(lines)
+
+-- Opens over the current float and takes focus; the float manager hands focus
+-- back to the picker underneath when the pane closes, so the picker keeps its
+-- loop and selection.
+function JobPane.open(job)
 ```
 
 ### `require("maki.list_picker")`
