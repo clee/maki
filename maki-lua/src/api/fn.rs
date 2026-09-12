@@ -176,6 +176,13 @@ pub(crate) enum Redirect {
 }
 
 impl Redirect {
+    fn file_path(&self) -> Option<&Path> {
+        match self {
+            Self::File(path) => Some(path),
+            _ => None,
+        }
+    }
+
     fn stdio(&self) -> Result<Stdio, String> {
         match self {
             Self::Capture => Ok(Stdio::piped()),
@@ -252,6 +259,8 @@ struct JobMeta {
     exit_code: Option<i32>,
     /// Recorded at exit so elapsed time stops counting once the process is gone.
     elapsed_secs: Option<u64>,
+    stdout_path: Option<PathBuf>,
+    stderr_path: Option<PathBuf>,
     /// Exit code owed to an `on_exit` attached after the process already died,
     /// served once by [`JobStore::next_matching`] as a synthetic event.
     replay_exit: Option<i32>,
@@ -399,6 +408,8 @@ impl JobStore {
             on_stderr,
             on_exit,
         } = spec;
+        let stdout_path = stdout.file_path().map(Path::to_path_buf);
+        let stderr_path = stderr.file_path().map(Path::to_path_buf);
         let mut command = cmd.build();
         strip_provider_keys(&mut command)
             .stdout(stdout.stdio()?)
@@ -507,6 +518,8 @@ impl JobStore {
                 reaped,
                 exit_code: None,
                 elapsed_secs: None,
+                stdout_path,
+                stderr_path,
                 replay_exit: None,
             },
         );
@@ -873,6 +886,10 @@ pub(crate) struct JobSnapshot {
     /// Some output never reached the tails, so what they hold is a window
     /// onto a longer stream.
     pub dropped_output: bool,
+    /// Set when the stream is redirected to a file: the file is the only
+    /// source of output for that stream.
+    pub stdout_path: Option<String>,
+    pub stderr_path: Option<String>,
 }
 
 impl JobSnapshot {
@@ -899,6 +916,8 @@ impl JobSnapshot {
                 Vec::new()
             },
             dropped_output: job.dropped_output,
+            stdout_path: job.stdout_path.as_deref().map(|p| p.display().to_string()),
+            stderr_path: job.stderr_path.as_deref().map(|p| p.display().to_string()),
         }
     }
 }
@@ -1298,7 +1317,8 @@ fn callback_update(lua: &Lua, opts: &Table, key: &str) -> LuaResult<CallbackUpda
 ///
 /// @param session string? Session id filter.
 /// @return (table) array of `{ id, command, name, pid, session, status,
-///   exit_code, elapsed_secs }`.
+///   exit_code, elapsed_secs, stdout_path, stderr_path }`. The paths are set
+///   only for a stream sent to a file.
 /// @example
 /// local jobs = maki.fn.joblist(maki.session.current())
 #[lua_fn(guard = Run)]
@@ -1337,6 +1357,8 @@ fn snapshot_table(lua: &Lua, snap: &JobSnapshot, tails: bool) -> LuaResult<Table
         },
     )?;
     row.set("exit_code", snap.exit_code)?;
+    row.set("stdout_path", snap.stdout_path.as_deref())?;
+    row.set("stderr_path", snap.stderr_path.as_deref())?;
     if tails {
         let stdout = lua.create_table()?;
         for (i, line) in snap.stdout_lines.iter().enumerate() {
@@ -1687,6 +1709,8 @@ mod tests {
             reaped: Arc::new(AtomicBool::new(false)),
             exit_code: None,
             elapsed_secs: None,
+            stdout_path: None,
+            stderr_path: None,
             replay_exit: None,
         }
     }
@@ -2054,6 +2078,37 @@ mod tests {
         assert!(snap.exit_code.is_none());
         assert!(store.snapshot(id, Some(2), TEST_PLUGIN, None).is_none());
         assert!(store.snapshot(999, Some(1), TEST_PLUGIN, None).is_none());
+    }
+
+    #[test]
+    fn snapshot_and_joblist_expose_redirect_paths() -> mlua::Result<()> {
+        let mut store = make_store();
+        let log = env::temp_dir().join("maki-job-pane-redirect-test.log");
+        let mut spec = JobSpec::new(task_owner(1), "echo hi");
+        spec.stdout = Redirect::File(log.clone());
+        let id = store.start(spec).unwrap();
+
+        let snap = store.snapshot(id, Some(1), TEST_PLUGIN, None).unwrap();
+        assert_eq!(snap.stdout_path.as_deref(), Some(log.to_str().unwrap()));
+        assert_eq!(snap.stderr_path, None);
+
+        let lua = Lua::new();
+        let snaps = store.list(None, Some(1), TEST_PLUGIN);
+        assert_eq!(snaps.len(), 1);
+        let row = snapshot_table(&lua, &snaps[0], false).unwrap();
+        assert_eq!(
+            row.get::<Option<String>>("stdout_path")?,
+            Some(log.to_string_lossy().into_owned())
+        );
+        assert_eq!(row.get::<Option<String>>("stderr_path")?, None);
+
+        let piped_id = start_echo(&mut store);
+        let piped = store
+            .snapshot(piped_id, Some(1), TEST_PLUGIN, None)
+            .unwrap();
+        assert_eq!(piped.stdout_path, None);
+        assert_eq!(piped.stderr_path, None);
+        Ok(())
     }
 
     #[test]
@@ -2631,7 +2686,9 @@ mod tests {
             serde_json::json!(TEST_SPAWNER)
         );
 
-        let snap = store.snapshot(id, None, TEST_PLUGIN, Some(session)).unwrap();
+        let snap = store
+            .snapshot(id, None, TEST_PLUGIN, Some(session))
+            .unwrap();
         assert_eq!(snap.spawned_by.as_deref(), Some(TEST_SPAWNER));
         store.kill_session(&lua, session);
     }

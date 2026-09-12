@@ -2477,7 +2477,8 @@ Requires the `run` [plugin permission](#plugin-permissions).
 - `{session?}` (`string?`) Session id filter.
 
 **Returns:** (`table`) array of `{ id, command, name, pid, session, status,
-  exit_code, elapsed_secs }`.
+  exit_code, elapsed_secs, stdout_path, stderr_path }`. The paths are set
+  only for a stream sent to a file.
 
 **Example:**
 
@@ -7460,19 +7461,30 @@ function M.replace(content, old_string, new_string, replace_all)
 
 ```lua
 -- Live read-only output pane for a command job, opened over whatever float
--- is showing (the /tasks picker, usually). Streams via jobattach; Esc closes
--- and detaches. Any picker can reuse it: `JobPane.open(job)` with a joblist
--- row.
+-- is showing (the /tasks picker, usually). Piped streams stream via jobattach;
+-- redirected streams (a stream sent to a file: no callbacks, no tails) are
+-- followed by re-reading a window at the end of the file. Esc closes and
+-- detaches. Any picker can reuse it: `JobPane.open(job)` with a joblist row.
 JobPane.MAX_LINES = MAX_LINES
 JobPane.KEEP_LINES = KEEP_LINES
+JobPane.FILE_MAX_LINES = FILE_MAX_LINES
 
 -- One output line as spans: the stream tag carries the style, the text stays
 -- plain. Theme roles only.
 function JobPane.stream_line(kind, text)
 function JobPane.exit_line(code)
 
--- The pane's starting content: the dropped note, then the tails, then the
--- exit line for a job that already finished.
+-- Lines of a redirected file's windowed content, keeping at most the last
+-- {max}; nil content (file missing or unreadable yet) is empty.
+function JobPane.file_lines(content, max)
+
+-- Per-stream texts: tail lines for a piped stream, lines of the file content
+-- (already read into {info[file_key]}) for a redirected one.
+function JobPane.stream_texts(info)
+
+-- The pane's starting content: the dropped note (tails lose lines past the
+-- cap, and a redirected stream is a window by definition), then the streams,
+-- then the exit line for a job that already finished.
 function JobPane.initial_lines(info)
 
 -- Last KEEP_LINES of {lines} once it outgrows MAX_LINES, else nil (nothing to
