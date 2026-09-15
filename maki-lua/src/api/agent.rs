@@ -901,6 +901,9 @@ async fn session(
     let (child_trigger, child_cancel) = agent_ctx.cancel.child();
     // Several sessions can share one `ui_id`, so keep the slot and retire
     // only ours on close instead of clearing the whole key.
+    // A session whose scope is the chat session, not the opening task, must
+    // outlive `end_run`: that is what the map's detached mark means.
+    let detached = owner.as_ref().is_some_and(|(_, task, _)| task.is_none());
     let cancel_slot = agent_ctx
         .subagent_cancels
         .insert(ui_id.clone(), child_trigger, detached);

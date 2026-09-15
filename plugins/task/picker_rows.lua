@@ -5,7 +5,12 @@
 
 local ListPicker = require("maki.list_picker")
 
+local RUN_ICON = "· "
+local OK_ICON = "✓ "
+local BAD_ICON = "✗ "
+
 local RUNNING_SECTION = "Running"
+local JOBS_SECTION = "Jobs"
 local FINISHED_SECTION = "Finished"
 
 local M = {}
@@ -17,12 +22,14 @@ end
 
 -- The main chat comes first and has no status. The subagents follow, live
 -- ones above finished ones so a long job never gets buried under the ones
--- that already returned. Within a section, newest first (`tasks` comes in
--- chat order, which is spawn order), so the latest task is the one at hand.
+-- that already returned. The Jobs section sits between: the session's command
+-- jobs from any plugin, running ones first. Within a section, newest first
+-- (`tasks` and `jobs` both arrive in chat order, which is spawn order), so
+-- the row at hand is the latest one.
 --
 -- Returns { rows, sections }. A row carries a section header only when it opens
 -- one, and `sections` counts what survived the filter.
-function M.build(tasks, query)
+function M.build(tasks, jobs, query)
   local words = ListPicker.split_words(query)
   local main, running, finished = nil, {}, {}
   for _, task in ipairs(tasks) do
@@ -37,17 +44,64 @@ function M.build(tasks, query)
     end
   end
 
+  local live_jobs, exited_jobs = {}, {}
+  for _, job in ipairs(jobs or {}) do
+    if ListPicker.matches(job.name or job.command, words) then
+      if job.status == "running" then
+        live_jobs[#live_jobs + 1] = job
+      else
+        exited_jobs[#exited_jobs + 1] = job
+      end
+    end
+  end
+
   local rows = {}
   if main then
     rows[#rows + 1] = { task = main }
   end
-  for _, group in ipairs({ { RUNNING_SECTION, running }, { FINISHED_SECTION, finished } }) do
-    local header, tasks_in_section = group[1], group[2]
-    for i = #tasks_in_section, 1, -1 do
-      rows[#rows + 1] = { task = tasks_in_section[i], section = i == #tasks_in_section and header or nil }
+  for _, group in ipairs({
+    { header = RUNNING_SECTION, items = running, key = "task" },
+    { header = JOBS_SECTION, items = live_jobs, key = "job" },
+    -- Same section as the live ones, so the header repeats only when a
+    -- filter emptied the live half.
+    { header = #live_jobs == 0 and JOBS_SECTION or nil, items = exited_jobs, key = "job" },
+    { header = FINISHED_SECTION, items = finished, key = "task" },
+  }) do
+    local items = group.items
+    for i = #items, 1, -1 do
+      rows[#rows + 1] = { [group.key] = items[i], section = i == #items and group.header or nil }
     end
   end
-  return { rows = rows, sections = { running = #running, finished = #finished } }
+  return {
+    rows = rows,
+    sections = {
+      running = #running,
+      jobs = #live_jobs + #exited_jobs,
+      finished = #finished,
+    },
+  }
+end
+
+-- Same glyph language as the task rows: the live spinner, then check or
+-- cross by exit code.
+function M.job_icon(job)
+  if job.status == "running" then
+    return RUN_ICON, "accent", true
+  elseif job.exit_code == 0 then
+    return OK_ICON, "success"
+  end
+  return BAD_ICON, "error"
+end
+
+function M.row_id(row)
+  return row.task and row.task.id or row.job.id
+end
+
+function M.row_name(row)
+  if row.task then
+    return row.task.name
+  end
+  return row.job.name or row.job.command
 end
 
 -- Only a finished subagent may leave the list. The main chat is the session
@@ -62,7 +116,7 @@ end
 -- the cursor with it.
 function M.index_of(rows, id)
   for i, row in ipairs(rows) do
-    if row.task.id == id then
+    if M.row_id(row) == id then
       return i
     end
   end
