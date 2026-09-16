@@ -184,4 +184,34 @@ case("job_icons_follow_the_exit_code", function()
   local bad_icon, bad_style = Rows.job_icon(SERVER_CRASHED)
   eq(bad_style, "error", "a nonzero exit gets the cross")
 end)
+
+local MONITOR_JOB =
+  { id = 7, name = "watch tests", command = "just test", status = "running", spawned_by = RESEARCH.id }
+local MONITOR_DONE = { id = 8, command = "sleep 30", status = "exited", exit_code = 1, spawned_by = BUILD.id }
+
+case("a_subagents_jobs_group_under_its_name", function()
+  local built = Rows.build({ MAIN, RESEARCH, BUILD }, { TESTS, MONITOR_JOB, MONITOR_DONE }, "")
+  eq(ids(built.rows), "main,toolu_01,7,8,1,toolu_02")
+  eq(
+    sections(built.rows),
+    "2:Running,3:  research,4:  build,5:Jobs,6:Finished",
+    "each spawner opens one indented section; main jobs keep the flat one"
+  )
+  eq(built.sections.jobs, 3)
+end)
+
+case("the_filter_matches_a_job_through_its_spawners_name", function()
+  local built = Rows.build({ MAIN, RESEARCH }, { MONITOR_JOB }, "research")
+  eq(ids(built.rows), "toolu_01,7", "the subagent's name keeps its job visible")
+  eq(ids(Rows.build({ MAIN, BUILD }, { MONITOR_JOB }, "benchmark").rows), "")
+end)
+
+case("a_subagent_job_without_a_matching_task_stays_unlisted_until_its_spawner_shows_up", function()
+  -- The spawned_by id has no task row (the subagent's row was filtered out),
+  -- but the job still groups alone rather than mixing into the main section.
+  local built = Rows.build({ MAIN }, { MONITOR_JOB }, "")
+  eq(ids(built.rows), "main,7")
+  eq(sections(built.rows), "2:  toolu_01", "the raw id stands in when no task row exists")
+end)
+
 th.report()

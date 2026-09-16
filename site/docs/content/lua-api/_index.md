@@ -2314,6 +2314,12 @@ Requires the `run` [plugin permission](#plugin-permissions).
     (default 20, 0 disables, max 1024).
   - `name` (`string?`) handle for `jobfind`, unique among the live jobs this
     plugin can see. Starting a second job under a live name is an error.
+    Session jobs also show it in the /tasks picker and on the `JobStart`
+    autocmd, so name long-running work even when you never look it up.
+  - `spawned_by` (`string?`) id of the subagent task that spawned the job
+    (from `ctx:task_id()`). Session jobs carry it on the `JobStart`
+    autocmd and the joblist row, so the activity list can group by
+    subagent.
 
 **Returns:** (`integer?`, `string?`) Job id, or nil plus an error message when the
   process could not start (binary not found, bad `cwd`, redirect file not

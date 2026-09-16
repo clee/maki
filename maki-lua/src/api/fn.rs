@@ -65,6 +65,7 @@ pub(crate) enum JobLifecycle {
         plugin: Arc<str>,
         name: Option<String>,
         command: String,
+        spawned_by: Option<Arc<str>>,
     },
     Exited {
         session: MakiId,
@@ -88,12 +89,14 @@ impl JobLifecycle {
                 plugin,
                 name,
                 command,
+                spawned_by,
             } => serde_json::json!({
                 "id": job_id,
                 "session": session.to_string(),
                 "plugin": plugin.as_ref(),
                 "name": name,
                 "command": command,
+                "spawned_by": spawned_by,
             }),
             Self::Exited {
                 session,
@@ -189,6 +192,10 @@ impl Redirect {
 
 pub(crate) struct JobSpec {
     pub owner: JobOwner,
+    /// Task id of the subagent (or other nested context) that spawned the
+    /// job, for grouping in the session's activity list. `None` means the
+    /// main chat spawned it.
+    pub spawned_by: Option<Arc<str>>,
     pub cmd: JobCommand,
     pub name: Option<String>,
     pub cwd: Option<String>,
@@ -204,6 +211,7 @@ impl JobSpec {
     pub(crate) fn new(owner: JobOwner, cmd: impl Into<JobCommand>) -> Self {
         Self {
             owner,
+            spawned_by: None,
             cmd: cmd.into(),
             name: None,
             cwd: None,
@@ -223,6 +231,7 @@ struct JobMeta {
     /// A reloaded plugin looks its job up by this instead of matching on the
     /// command string. See [`JobStore::find_named`].
     name: Option<String>,
+    spawned_by: Option<Arc<str>>,
     pid: u32,
     started: Instant,
     on_stdout: Option<RegistryKey>,
@@ -276,6 +285,7 @@ impl JobMeta {
                 plugin: Arc::clone(plugin),
                 name: self.name.clone(),
                 command: self.command.clone(),
+                spawned_by: self.spawned_by.clone(),
             },
         ))
     }
@@ -378,6 +388,7 @@ impl JobStore {
     pub fn start(&mut self, spec: JobSpec) -> Result<u32, String> {
         let JobSpec {
             owner,
+            spawned_by,
             cmd,
             name,
             cwd,
@@ -478,6 +489,7 @@ impl JobStore {
             JobMeta {
                 owner,
                 command: cmd.display(),
+                spawned_by,
                 name,
                 pid,
                 started: Instant::now(),
@@ -844,6 +856,7 @@ pub(crate) struct JobSnapshot {
     pub id: u32,
     pub command: String,
     pub name: Option<String>,
+    pub spawned_by: Option<Arc<str>>,
     pub session: Option<MakiId>,
     pub pid: u32,
     pub elapsed_secs: u64,
@@ -860,6 +873,7 @@ impl JobSnapshot {
         Self {
             id,
             command: job.command.clone(),
+            spawned_by: job.spawned_by.clone(),
             name: job.name.clone(),
             session: job.session(),
             pid: job.pid,
@@ -967,6 +981,12 @@ fn kill_job(job: &JobMeta) {
 ///     (default 20, 0 disables, max 1024).
 ///   `name` (string?) handle for `jobfind`, unique among the live jobs this
 ///     plugin can see. Starting a second job under a live name is an error.
+///     Session jobs also show it in the /tasks picker and on the `JobStart`
+///     autocmd, so name long-running work even when you never look it up.
+///   `spawned_by` (string?) id of the subagent task that spawned the job
+///     (from `ctx:task_id()`). Session jobs carry it on the `JobStart`
+///     autocmd and the joblist row, so the activity list can group by
+///     subagent.
 /// @return (integer?, string?) Job id, or nil plus an error message when the
 ///   process could not start (binary not found, bad `cwd`, redirect file not
 ///   writable).
@@ -1001,6 +1021,10 @@ fn jobstart(
             .ok()
             .map(|t| t.pairs::<String, String>().filter_map(Result::ok).collect());
         spec.name = job_name(opts)?;
+        spec.spawned_by = opts
+            .get::<Option<String>>("spawned_by")?
+            .filter(|id| !id.trim().is_empty())
+            .map(Arc::from);
         spec.on_stdout = callback_key(lua, opts, "on_stdout")?;
         spec.on_stderr = callback_key(lua, opts, "on_stderr")?;
         spec.on_exit = callback_key(lua, opts, "on_exit")?;
@@ -1253,6 +1277,7 @@ fn snapshot_table(lua: &Lua, snap: &JobSnapshot, tails: bool) -> LuaResult<Table
     row.set("id", snap.id)?;
     row.set("command", snap.command.as_str())?;
     row.set("name", snap.name.as_deref())?;
+    row.set("spawned_by", snap.spawned_by.as_deref())?;
     row.set("pid", snap.pid)?;
     row.set("session", snap.session.map(|s| s.to_string()))?;
     row.set("elapsed_secs", snap.elapsed_secs)?;
@@ -1600,6 +1625,7 @@ mod tests {
         JobMeta {
             owner,
             command: String::new(),
+            spawned_by: None,
             name: None,
             pid: 0,
             started: Instant::now(),
@@ -2473,6 +2499,7 @@ mod tests {
     }
 
     const TEST_JOB_NAME: &str = "watcher";
+    const TEST_SPAWNER: &str = "toolu_01";
 
     fn make_lifecycle_store() -> (JobStore, flume::Receiver<(u32, JobLifecycle)>) {
         let (tx, rx) = flume::unbounded();
@@ -2483,6 +2510,27 @@ mod tests {
         let mut spec = JobSpec::new(session_owner(session), "echo hi");
         spec.name = Some(TEST_JOB_NAME.into());
         store.start(spec).unwrap()
+    }
+
+    #[test]
+    fn spawned_by_reaches_the_lifecycle_and_the_snapshot() {
+        let lua = Lua::new();
+        let (mut store, lifecycle_rx) = make_lifecycle_store();
+        let session = MakiId::generate();
+        let mut spec = JobSpec::new(session_owner(session), "echo hi");
+        spec.name = Some(TEST_JOB_NAME.into());
+        spec.spawned_by = Some(Arc::from(TEST_SPAWNER));
+        let id = store.start(spec).unwrap();
+
+        let (_, start) = lifecycle_rx.try_recv().unwrap();
+        assert_eq!(
+            start.to_json(id)["spawned_by"],
+            serde_json::json!(TEST_SPAWNER)
+        );
+
+        let snap = store.snapshot(id, None, TEST_PLUGIN).unwrap();
+        assert_eq!(snap.spawned_by.as_deref(), Some(TEST_SPAWNER));
+        store.kill_session(&lua, session);
     }
 
     #[test]
@@ -2503,6 +2551,7 @@ mod tests {
                 "plugin": TEST_PLUGIN,
                 "name": TEST_JOB_NAME,
                 "command": "echo hi",
+                "spawned_by": null,
             })
         );
 
