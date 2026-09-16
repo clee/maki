@@ -47,13 +47,21 @@ local function ids(rows)
   return table.concat(out, ",")
 end
 
--- "3:Finished" reads as: row 3 opens the Finished section. Rows left out of the
--- string draw no header, so it also pins down where sections do not appear.
-local function sections(rows)
+-- "2:1" reads as: row 2 sits one nesting step under the root. Main is the
+-- root at 0, subagents and its jobs at 1, a subagent's jobs at 2.
+local function depths(rows)
   local out = {}
-  for i, row in ipairs(rows) do
-    if row.section then
-      out[#out + 1] = i .. ":" .. row.section
+  for _, row in ipairs(rows) do
+    out[#out + 1] = tostring(row.depth)
+  end
+  return table.concat(out, ",")
+end
+
+local function folds(rows)
+  local out = {}
+  for _, row in ipairs(rows) do
+    if row.task and row.job_count then
+      out[#out + 1] = Rows.row_id(row) .. "=" .. (row.collapsed and "shut" or "open") .. row.job_count
     end
   end
   return table.concat(out, ",")
@@ -62,7 +70,7 @@ end
 case("main_is_pinned_first_and_running_beats_finished", function()
   local built = Rows.build({ MAIN, RESEARCH, BUILD, BENCH, DEPLOY }, {}, "")
   eq(ids(built.rows), "main,toolu_04,toolu_01,toolu_03,toolu_02", "newest first within a section")
-  eq(sections(built.rows), "2:Running,4:Finished", "main has no header and each section opens once")
+  eq(depths(built.rows), "0,1,1,1,1", "main at the root, subagents one step under it")
   eq(built.sections.running, 2)
   eq(built.sections.finished, 2)
 end)
@@ -73,11 +81,9 @@ end)
 case("a_task_that_finishes_moves_sections_and_stays_addressable", function()
   local before = Rows.build({ MAIN, RESEARCH, DEPLOY, AUDIT, BUILD }, {}, "")
   eq(ids(before.rows), table.concat({ MAIN.id, AUDIT.id, DEPLOY.id, RESEARCH.id, BUILD.id }, ","))
-  eq(sections(before.rows), "2:Running,5:Finished")
   eq(Rows.index_of(before.rows, RESEARCH.id), 4)
 
   local after = Rows.build({ MAIN, RESEARCH_DONE, DEPLOY, AUDIT, BUILD }, {}, "")
-  eq(sections(after.rows), "2:Running,4:Finished")
   eq(Rows.index_of(after.rows, AUDIT.id), 2)
   eq(Rows.index_of(after.rows, DEPLOY.id), 3)
   eq(Rows.index_of(after.rows, BUILD.id), 4)
@@ -107,13 +113,13 @@ case("a_filter_that_empties_a_section_zeroes_its_count_and_header", function()
 
   local finished_only = Rows.build(all, {}, "b")
   eq(ids(finished_only.rows), BENCH.id .. "," .. BUILD.id)
-  eq(sections(finished_only.rows), "1:Finished", "no running row means no Running header")
+  eq(depths(finished_only.rows), "1,1")
   eq(finished_only.sections.running, 0)
   eq(finished_only.sections.finished, 2)
 
   local running_only = Rows.build(all, {}, DEPLOY.name)
   eq(ids(running_only.rows), DEPLOY.id)
-  eq(sections(running_only.rows), "1:Running", "no finished row means no Finished header")
+  eq(depths(running_only.rows), "1")
   eq(running_only.sections.running, 1)
   eq(running_only.sections.finished, 0)
 
@@ -136,7 +142,8 @@ end)
 case("an_idle_plugin_task_sorts_with_the_running_ones", function()
   local built = Rows.build({ MAIN, BUILD, MONITOR }, {}, "")
   eq(ids(built.rows), "main,session-01,toolu_02")
-  eq(sections(built.rows), "2:Running,3:Finished")
+  eq(built.sections.running, 1, "idle counts as running, not finished")
+  eq(built.sections.finished, 1)
 end)
 
 local TESTS = { id = 1, name = "just test", status = "running", exit_code = nil }
@@ -144,17 +151,18 @@ local SERVER = { id = 2, name = "serve site", command = "cargo run", status = "r
 local TESTS_DONE = { id = 1, name = "just test", command = "just test", status = "exited", exit_code = 0 }
 local SERVER_CRASHED = { id = 2, name = "serve site", command = "cargo run", status = "exited", exit_code = 3 }
 
-case("jobs_sit_between_running_and_finished_tasks", function()
+case("main_jobs_nest_under_main_before_the_subagents", function()
   local built = Rows.build({ MAIN, RESEARCH, BUILD }, { TESTS, SERVER }, "")
-  eq(ids(built.rows), "main,toolu_01,2,1,toolu_02", "newest job first, like the task sections")
-  eq(sections(built.rows), "2:Running,3:Jobs,5:Finished", "one header for both job halves")
+  eq(ids(built.rows), "main,2,1,toolu_01,toolu_02")
+  eq(depths(built.rows), "0,1,1,1,1")
+  eq(folds(built.rows), "main=open2", "main owns both jobs under one fold")
   eq(built.sections.jobs, 2)
 end)
 
-case("exited_jobs_follow_live_ones_without_repeating_the_header", function()
+case("exited_jobs_follow_live_ones_and_survive_a_filtered_out_main", function()
   local built = Rows.build({}, { TESTS_DONE, SERVER_CRASHED }, "")
-  eq(ids(built.rows), "2,1")
-  eq(sections(built.rows), "1:Jobs")
+  eq(ids(built.rows), "2,1", "main filtered out does not strand its jobs")
+  eq(depths(built.rows), "0,0")
 end)
 
 case("the_filter_matches_job_names_and_commands", function()
@@ -191,13 +199,22 @@ local MONITOR_DONE = { id = 8, command = "sleep 30", status = "exited", exit_cod
 
 case("a_subagents_jobs_group_under_its_name", function()
   local built = Rows.build({ MAIN, RESEARCH, BUILD }, { TESTS, MONITOR_JOB, MONITOR_DONE }, "")
-  eq(ids(built.rows), "main,toolu_01,7,8,1,toolu_02")
-  eq(
-    sections(built.rows),
-    "2:Running,3:  research,4:  build,5:Jobs,6:Finished",
-    "each spawner opens one indented section; main jobs keep the flat one"
-  )
+  eq(ids(built.rows), "main,1,toolu_01,7,toolu_02,8")
+  eq(depths(built.rows), "0,1,1,2,1,2", "each spawner nests its own jobs one step deeper")
+  eq(folds(built.rows), "main=open1,toolu_01=open1,toolu_02=open1")
   eq(built.sections.jobs, 3)
+end)
+
+case("collapsing_a_task_hides_its_jobs_but_keeps_the_count", function()
+  local collapsed = { [RESEARCH.id] = true }
+  local built = Rows.build({ MAIN, RESEARCH, BUILD }, { MONITOR_JOB, MONITOR_DONE }, "", collapsed)
+  eq(ids(built.rows), "main,toolu_01,toolu_02,8", "research's job is folded away, build's stays")
+  eq(folds(built.rows), "toolu_01=shut1,toolu_02=open1", "task rows without jobs carry no fold")
+end)
+
+case("a_missing_collapsed_map_defaults_to_open", function()
+  local built = Rows.build({ MAIN, RESEARCH }, { MONITOR_JOB }, "", nil)
+  eq(folds(built.rows), "toolu_01=open1")
 end)
 
 case("the_filter_matches_a_job_through_its_spawners_name", function()
@@ -206,12 +223,12 @@ case("the_filter_matches_a_job_through_its_spawners_name", function()
   eq(ids(Rows.build({ MAIN, BUILD }, { MONITOR_JOB }, "benchmark").rows), "")
 end)
 
-case("a_subagent_job_without_a_matching_task_stays_unlisted_until_its_spawner_shows_up", function()
+case("a_subagent_job_without_a_matching_task_still_lists", function()
   -- The spawned_by id has no task row (the subagent's row was filtered out),
-  -- but the job still groups alone rather than mixing into the main section.
+  -- but the job still lists rather than vanishing with its spawner.
   local built = Rows.build({ MAIN }, { MONITOR_JOB }, "")
   eq(ids(built.rows), "main,7")
-  eq(sections(built.rows), "2:  toolu_01", "the raw id stands in when no task row exists")
+  eq(depths(built.rows), "0,1", "the orphan sits one step under the root, like any job")
 end)
 
 th.report()
