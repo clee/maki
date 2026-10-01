@@ -9,11 +9,18 @@ use smol::lock::{Semaphore, SemaphoreGuardArc};
 
 use crate::docs::{FnDoc, ParamDoc};
 use crate::runtime::{
-    SpawnedTask, TaskHandle, enqueue_async_task, enqueue_spawned_task, lock_cell,
+    SpawnedTask, TaskHandle, enqueue_async_task_deadline, enqueue_spawned_task, lock_cell,
     register_cancel_hook,
 };
 
 const AWAIT_MIN_ARGS: usize = 2;
+const RUN_ON_FINISH_TYPE_ERR: &str = "on_finish must be a function";
+const RUN_SECOND_ARG_TYPE_ERR: &str =
+    "the second argument must be an on_finish function or an options table";
+const RUN_DEADLINE_NEGATIVE_ERR: &str = "deadline_ms must be >= 0";
+const RUN_DEADLINE_TYPE_ERR: &str = "deadline_ms must be an integer (milliseconds) or false";
+const RUN_SCOPE_TYPE_ERR: &str = "scope must be \"session\" if set";
+const SCOPE_SESSION: &str = "session";
 const PERMIT_RELEASED_ERR: &str = "permit already released";
 const SLEEP_NEGATIVE_ERR: &str = "maki.async.sleep: ms must be >= 0";
 
@@ -90,35 +97,93 @@ lua_class! {
 /// and stopped after 60 seconds. For work that outlives the caller, use
 /// `maki.async.spawn`.
 ///
+/// The task has no deadline by default: pass {deadline_ms} (integer
+/// milliseconds) to cap it. The cap is opt-in so a plugin that loops in
+/// `async.run` keeps running until cancelled, not until a hidden timer
+/// fires.
+///
+/// By default the task inherits the caller's cancellation, so ending the
+/// calling tool call ends it too. Pass {scope = "session"} for work that
+/// must outlive the calling turn, such as a background subagent waiting
+/// on a session: the task then only ends on its deadline or when its
+/// function returns.
+///
+/// A task abandoned by its deadline or a cancel it inherited still reports
+/// through {on_finish} exactly once, with the reason (`"timeout"` or
+/// `"cancelled"`) as the error, so background work cannot vanish silently.
+///
 /// @param fn function Zero-argument function to execute.
-/// @param on_finish function? Optional callback `function(err, result)`. Called once {fn} completes.
+/// @param on_finish_or_opts function|table? The legacy form passes the {on_finish} callback directly: `function(err, result)`. The table form: {on_finish} is `function(err, result)`, called once {fn} completes or the task is abandoned; {deadline_ms} is integer milliseconds to opt into a cap; {scope} is `"session"` to escape the caller's cancellation.
 /// @example
 /// maki.async.run(function()
 ///   local data = expensive_fetch()
 ///   process(data)
-/// end)
+/// end, { deadline_ms = 30_000 })
 #[lua_fn]
-fn run(lua: &Lua, r#fn: Function, on_finish: Option<Function>) -> LuaResult<()> {
+fn run(lua: &Lua, r#fn: Function, on_finish_or_opts: Option<Value>) -> LuaResult<()> {
+    let (on_finish, deadline, detached) = match on_finish_or_opts {
+        None | Some(Value::Nil) => (None, None, false),
+        Some(Value::Function(f)) => (Some(f), None, false),
+        Some(Value::Table(opts)) => {
+            let on_finish = match opts.raw_get::<Value>("on_finish")? {
+                Value::Nil => None,
+                Value::Function(f) => Some(f),
+                _ => return Err(mlua::Error::runtime(RUN_ON_FINISH_TYPE_ERR)),
+            };
+            let deadline = match opts.raw_get::<Value>("deadline_ms")? {
+                Value::Nil => None,
+                Value::Boolean(false) => None,
+                Value::Integer(ms) if ms >= 0 => Some(Duration::from_millis(ms as u64)),
+                Value::Integer(_) => {
+                    return Err(mlua::Error::runtime(RUN_DEADLINE_NEGATIVE_ERR));
+                }
+                _ => return Err(mlua::Error::runtime(RUN_DEADLINE_TYPE_ERR)),
+            };
+            let detached = match opts.raw_get::<Value>("scope")? {
+                Value::Nil => false,
+                Value::String(s) if s.to_str()?.as_ref() == SCOPE_SESSION => true,
+                _ => return Err(mlua::Error::runtime(RUN_SCOPE_TYPE_ERR)),
+            };
+            (on_finish, deadline, detached)
+        }
+        _ => return Err(mlua::Error::runtime(RUN_SECOND_ARG_TYPE_ERR)),
+    };
     let actual_work = if let Some(cb) = on_finish {
+        let register_hook =
+            lua.create_function(|lua, r#fn: Function| register_cancel_hook(lua, r#fn))?;
         lua.load(
             r#"
-                local work, finish = ...
+                local work, finish, on_cancel = ...
+                local done = false
+                local function finish_once(err, result)
+                    if done then
+                        return
+                    end
+                    done = true
+                    finish(err, result)
+                end
                 return function()
+                    on_cancel(function(reason)
+                        finish_once(reason)
+                    end)
+                    if done then
+                        return
+                    end
                     local ok, result = pcall(work)
                     if ok then
-                        finish(nil, result)
+                        finish_once(nil, result)
                     else
-                        finish(result)
+                        finish_once(result)
                     end
                 end
             "#,
         )
-        .call::<Function>((r#fn, cb))?
+        .call::<Function>((r#fn, cb, register_hook))?
     } else {
         r#fn
     };
     let work_key = lua.create_registry_value(actual_work)?;
-    enqueue_async_task(lua, work_key)?;
+    enqueue_async_task_deadline(lua, work_key, deadline, detached)?;
     Ok(())
 }
 
@@ -468,11 +533,11 @@ pub(crate) fn create_async_table(lua: &Lua, plugin: Arc<str>) -> LuaResult<Table
                         if to_go == 0 then
                             on_finish()
                         elseif #remaining > 0 then
-                            async_tbl.run(table.remove(remaining, 1), run_next)
+                            async_tbl.run(table.remove(remaining, 1), { on_finish = run_next })
                         end
                     end
                     for i = 1, max_jobs do
-                        async_tbl.run(funs[i], run_next)
+                        async_tbl.run(funs[i], { on_finish = run_next })
                     end
                 end)
             end
@@ -976,6 +1041,46 @@ mod tests {
         }));
         let order: Vec<String> = lua.load("return order").eval().unwrap();
         assert_eq!(order, ["before", "other", "after"]);
+    }
+
+    #[test_case(
+        r#"return async_tbl.run(function() end, { on_finish = 42 })"#,
+        RUN_ON_FINISH_TYPE_ERR ; "on_finish_not_fn"
+    )]
+    #[test_case(
+        r#"return async_tbl.run(function() end, { deadline_ms = -1 })"#,
+        RUN_DEADLINE_NEGATIVE_ERR ; "negative_deadline"
+    )]
+    #[test_case(
+        r#"return async_tbl.run(function() end, { deadline_ms = "soon" })"#,
+        RUN_DEADLINE_TYPE_ERR ; "deadline_not_integer"
+    )]
+    #[test_case(
+        r#"return async_tbl.run(function() end, { deadline_ms = true })"#,
+        RUN_DEADLINE_TYPE_ERR ; "deadline_true_invalid"
+    )]
+    #[test_case(
+        r#"return async_tbl.run(function() end, { scope = "turn" })"#,
+        RUN_SCOPE_TYPE_ERR ; "scope_unknown_value"
+    )]
+    #[test_case(
+        r#"return async_tbl.run(function() end, { scope = 42 })"#,
+        RUN_SCOPE_TYPE_ERR ; "scope_not_string"
+    )]
+    #[test_case(
+        r#"return async_tbl.run(function() end, 42)"#,
+        RUN_SECOND_ARG_TYPE_ERR ; "second_arg_not_fn_or_table"
+    )]
+    fn run_validation(code: &str, expected_err: &str) {
+        smol::block_on(async {
+            let (lua, _tbl) = setup();
+            let err = lua.load(code).eval_async::<Value>().await.unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains(expected_err),
+                "expected error containing {expected_err:?}, got: {msg}"
+            );
+        });
     }
 
     #[test_case(-1; "negative_ms")]

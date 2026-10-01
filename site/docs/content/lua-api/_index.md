@@ -1734,7 +1734,7 @@ local results = maki.async.gather({
 ### `maki.async.run()` {#maki-async-run}
 
 ```lua
-maki.async.run({fn}, {on_finish?})
+maki.async.run({fn}, {on_finish_or_opts?})
 ```
 
 Start {fn} as a background task without waiting for it. Pass
@@ -1742,10 +1742,25 @@ Start {fn} as a background task without waiting for it. Pass
 and stopped after 60 seconds. For work that outlives the caller, use
 `maki.async.spawn`.
 
+The task has no deadline by default: pass {deadline_ms} (integer
+milliseconds) to cap it. The cap is opt-in so a plugin that loops in
+`async.run` keeps running until cancelled, not until a hidden timer
+fires.
+
+By default the task inherits the caller's cancellation, so ending the
+calling tool call ends it too. Pass {scope = "session"} for work that
+must outlive the calling turn, such as a background subagent waiting
+on a session: the task then only ends on its deadline or when its
+function returns.
+
+A task abandoned by its deadline or a cancel it inherited still reports
+through {on_finish} exactly once, with the reason (`"timeout"` or
+`"cancelled"`) as the error, so background work cannot vanish silently.
+
 **Parameters:**
 
 - `{fn}` (`function`) Zero-argument function to execute.
-- `{on_finish?}` (`function?`) Optional callback `function(err, result)`. Called once {fn} completes.
+- `{on_finish_or_opts?}` (`function|table?`) The legacy form passes the {on_finish} callback directly: `function(err, result)`. The table form: {on_finish} is `function(err, result)`, called once {fn} completes or the task is abandoned; {deadline_ms} is integer milliseconds to opt into a cap; {scope} is `"session"` to escape the caller's cancellation.
 
 **Example:**
 
@@ -1753,7 +1768,7 @@ and stopped after 60 seconds. For work that outlives the caller, use
 maki.async.run(function()
   local data = expensive_fetch()
   process(data)
-end)
+end, { deadline_ms = 30_000 })
 ```
 
 ---
