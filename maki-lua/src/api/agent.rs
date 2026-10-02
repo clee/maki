@@ -903,7 +903,7 @@ async fn session(
     // only ours on close instead of clearing the whole key.
     let cancel_slot = agent_ctx
         .subagent_cancels
-        .insert(ui_id.clone(), child_trigger);
+        .insert(ui_id.clone(), child_trigger, detached);
 
     let cancellation = Arc::new(SessionCancellation {
         parent_cancels: Arc::clone(&agent_ctx.subagent_cancels),

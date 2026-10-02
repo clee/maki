@@ -1982,7 +1982,7 @@ pub(crate) fn enqueue_spawned_task(
         .app_data_ref::<SpawnedTasks>()
         .ok_or_else(|| mlua::Error::runtime(NO_PLUGIN_HOST))?;
     let (trigger, cancel) = CancelToken::new();
-    let slot = spawned.0.insert(Arc::clone(&plugin), trigger);
+    let slot = spawned.0.insert(Arc::clone(&plugin), trigger, true);
     if cancel.is_cancelled() {
         tracing::debug!(plugin = %plugin, "maki.async.spawn from an unloaded plugin, dropped");
     }
