@@ -41,6 +41,9 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "task",
             "task_result",
             "task_wait",
+            "background_run",
+            "background_task",
+            "background_output",
             "todo_write",
             "memory",
             "skill",
@@ -236,7 +239,19 @@ fn load_registry_with_builtins() -> (Arc<ToolRegistry>, HashSet<String>) {
     for &sub in maki_config::EDIT_SUB_TOOLS {
         edit.opts.insert(sub.to_owned(), Value::Bool(true));
     }
-    let config = PluginsConfig::from_plugins(HashMap::from([("edit".to_owned(), edit)]));
+    let mut plugins = HashMap::from([("edit".to_owned(), edit)]);
+    // Ship-switched-off plugins register tools too; load them so the
+    // reference documents what a user who opts in gets.
+    plugins.extend(maki_config::OPTIONAL_BUILTINS.iter().map(|name| {
+        (
+            (*name).to_owned(),
+            PluginFileConfig {
+                enabled: Some(true),
+                ..PluginFileConfig::default()
+            },
+        )
+    }));
+    let config = PluginsConfig::from_plugins(plugins);
 
     let registry = Arc::new(ToolRegistry::new());
     let host = in_registration_window(|| {
@@ -263,7 +278,7 @@ pub fn generate() -> String {
         .set("{platform}", "linux")
         .set("{date}", "YYYY-MM-DD");
 
-    let (registry, opt_in) = load_registry_with_builtins();
+    let (registry, mut opt_in) = load_registry_with_builtins();
     let defs = registry.definitions(
         &vars,
         &DescriptionContext {
@@ -293,6 +308,17 @@ pub fn generate() -> String {
         }
     }
 
+    // Tools of ship-switched-off plugins are opt-in the plugin way: the gate
+    // is `plugins.<name>.enabled`, not an option, but the reader's action is
+    // the same, so they share the badge and the count.
+    for (name, info) in &tools {
+        if let ToolSource::Lua { plugin } = &info.source
+            && maki_config::OPTIONAL_BUILTINS.contains(&plugin.as_ref())
+        {
+            opt_in.insert((*name).to_owned());
+        }
+    }
+
     let total = tools.len();
     let mut out = String::new();
     write_front_matter(&mut out);
@@ -304,7 +330,7 @@ pub fn generate() -> String {
     writeln!(
         out,
         "Maki ships with {total} built-in tools in this reference \
-         ({default_n} on by default, {opt_in_n} opt-in via plugin options). \
+         ({default_n} on by default, {opt_in_n} opt-in). \
          Tools marked **opt-in** are off until you enable them under `plugins` \
          in [Configuration](/docs/configuration/)."
     )
