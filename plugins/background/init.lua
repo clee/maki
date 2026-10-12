@@ -14,6 +14,8 @@
 -- session ends or its loop respawns (model change, rewind, session load),
 -- and its ids reset on /reload.
 
+local ToolView = require("maki.tool_view")
+
 local NAME_PREFIX = "bg:"
 local TAIL_LINES = 1024
 local DEFAULT_QUERY_LINES = 50
@@ -25,6 +27,45 @@ local NOTIFY_MAX_BYTES = 1200
 local SUMMARY_MISSING_ERROR = "background task finished without providing a summary"
 local NUDGE_SUMMARY =
   "You finished your work but did not provide a summary. Reply with a concise summary of what you did and found."
+
+-- The row body for launched work: one pinned summary line with the full
+-- command or prompt underneath, click to fold it open. An expanded tool row
+-- clips instead of wrapping, so the text is hard-wrapped to the terminal here
+-- and "the whole command" is really whole on any width.
+local VIEW_LINES_FALLBACK = 3
+local CMD_PREFIX = "$ "
+
+local function text_rows(text, prefix)
+  local width = math.max(maki.ui.terminal_size().cols - #prefix, 20)
+  local out = {}
+  for _, line in ipairs(maki.split(text, "\n")) do
+    local rest = line
+    repeat
+      local cut = maki.ui.truncate_text(rest, width)
+      out[#out + 1] = prefix == "" and { { cut.head } } or { { prefix, "dim" }, { cut.head } }
+      rest = cut.tail
+    until rest == ""
+  end
+  return out
+end
+
+local function detail_view(info, rows, ctx, budget_key)
+  local tol = ctx:tool_output_lines()
+  local buf = maki.ui.buf()
+  local view = ToolView.new(buf, {
+    max_lines = (tol and tol[budget_key]) or VIEW_LINES_FALLBACK,
+    keep = "head",
+  })
+  view:set_header({ { info, "dim" } })
+  for _, row in ipairs(rows) do
+    view:append(row)
+  end
+  view:finish()
+  buf:on("click", function()
+    view:toggle()
+  end)
+  return buf
+end
 
 local opts = maki.api.register_options({
   max_concurrent = { default = 4, min = 1, desc = "Max concurrently running background subagents." },
@@ -188,7 +229,21 @@ maki.api.register_tool({
   header = function(input)
     return input.name or input.command
   end,
-  handler = function(input)
+  restore = function(input, output, is_error, ctx)
+    if not is_error and input and input.command then
+      local pid, job = output:match("pid (%d+), job id (%d+)")
+      if pid then
+        return detail_view(
+          ("pid %s · job %s · read with background_output id=%s"):format(pid, job, pid),
+          text_rows(input.command, CMD_PREFIX),
+          ctx,
+          "background_run"
+        )
+      end
+    end
+    return ToolView.restore(output, { keep = "head" })
+  end,
+  handler = function(input, ctx)
     local command = input.command
     if type(command) ~= "string" or not command:match("%S") then
       return { llm_output = "error: command is required", is_error = true }
@@ -220,6 +275,12 @@ maki.api.register_tool({
         info.pid,
         id,
         info.pid
+      ),
+      body = detail_view(
+        ("pid %d · job %d · read with background_output id=%d"):format(info.pid, id, info.pid),
+        text_rows(input.command, CMD_PREFIX),
+        ctx,
+        "background_run"
       ),
     }
   end,
@@ -347,6 +408,12 @@ local function task_handler(input, ctx)
       input.description,
       id
     ),
+    body = detail_view(
+      ("task %s · read with background_output id=%s"):format(id, id),
+      text_rows(input.prompt, ""),
+      ctx,
+      "background_task"
+    ),
   }
 end
 
@@ -373,6 +440,20 @@ Notes:
   handler = task_handler,
   header = function(input)
     return input.description
+  end,
+  restore = function(input, output, is_error, ctx)
+    if not is_error and input and input.prompt then
+      local id = output:match("Started background task (%S+) ")
+      if id then
+        return detail_view(
+          ("task %s · read with background_output id=%s"):format(id, id),
+          text_rows(input.prompt, ""),
+          ctx,
+          "background_task"
+        )
+      end
+    end
+    return ToolView.restore(output, { keep = "head" })
   end,
 })
 

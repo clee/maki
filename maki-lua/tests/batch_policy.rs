@@ -55,12 +55,14 @@ const EDIT_TOOL: &str = "edit";
 const EDIT_TARGET: &str = "f.rs";
 const STATUS_SUCCESS: &str = "success";
 const STATUS_ERROR: &str = "error";
-const MARKER_A: &str = "AAA";
-const MARKER_B: &str = "BBB";
-const EDITED_A: &str = "aaa";
-const EDITED_B: &str = "bbb";
+// syntax_check is force-enabled by `with_all_builtins`, so the edit scratch
+// file must hold valid Rust: comment-prefixed tokens parse, bare ones do not.
+const MARKER_A: &str = "//AAA";
+const MARKER_B: &str = "//BBB";
+const EDITED_A: &str = "//aaa";
+const EDITED_B: &str = "//bbb";
 /// Whichever of the two edits lands first erases the other's `old_string`.
-const OVERLAP_SOURCE: &str = "XYZ";
+const OVERLAP_SOURCE: &str = "//XYZ";
 const OVERLAP_HEAD: &str = "XY";
 const OVERLAP_HEAD_NEW: &str = "Q";
 const OVERLAP_TAIL: &str = "YZ";
