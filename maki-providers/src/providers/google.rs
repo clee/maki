@@ -542,6 +542,8 @@ struct SseUsageMetadata {
     #[serde(default)]
     candidates_token_count: u32,
     #[serde(default)]
+    thoughts_token_count: u32,
+    #[serde(default)]
     cached_content_token_count: Option<u32>,
 }
 
@@ -632,7 +634,9 @@ async fn parse_sse(
 
         if let Some(meta) = chunk.usage_metadata {
             usage.input = meta.prompt_token_count;
-            usage.output = meta.candidates_token_count;
+            usage.output = meta
+                .candidates_token_count
+                .saturating_add(meta.thoughts_token_count);
             if let Some(cached) = meta.cached_content_token_count {
                 usage.cache_read = cached;
             }
@@ -858,8 +862,8 @@ mod tests {
 
         // Clamped to the model's max thinking budget (half of 8192 output tokens).
         assert_eq!(
-            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
-            4096
+            body["generationConfig"]["thinkingConfig"],
+            json!({"includeThoughts": true, "thinkingBudget": 4096})
         );
     }
 
@@ -1221,10 +1225,11 @@ mod tests {
 
     #[test]
     fn parse_sse_thinking_part() {
-        let data = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"thinking...\",\"thought\":true,\"thoughtSignature\":\"sig1\"}]}},{\"content\":{\"parts\":[{\"text\":\"answer\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":20}}\n\n";
+        let data = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"thinking...\",\"thought\":true,\"thoughtSignature\":\"sig1\"}]}},{\"content\":{\"parts\":[{\"text\":\"answer\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":20,\"thoughtsTokenCount\":30}}\n\n";
         let response = mock_response(data);
         let (tx, _rx) = flume::unbounded();
         let result = smol::block_on(parse_sse(response, &tx, Duration::from_secs(30))).unwrap();
+        assert_eq!(result.usage.output, 50);
         assert!(matches!(
             &result.message.content[0],
             ContentBlock::Thinking { thinking, signature } if thinking == "thinking..." && signature.as_deref() == Some("sig1")
