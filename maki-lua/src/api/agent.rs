@@ -246,11 +246,12 @@ impl Upstream {
 
     /// The transcript as of now. A plugin task writes it after every prompt,
     /// so a monitor that dies with the process still leaves what it did.
-    fn send_history(&self, tool_use_id: &str, messages: Vec<Message>) {
+    fn send_history(&self, tool_use_id: &str, messages: Vec<Message>, failed: bool) {
         self.send_event(
             AgentEvent::SubagentHistory {
                 tool_use_id: tool_use_id.to_owned(),
                 messages,
+                failed,
             },
             None,
         );
@@ -900,9 +901,12 @@ async fn session(
     let (child_trigger, child_cancel) = agent_ctx.cancel.child();
     // Several sessions can share one `ui_id`, so keep the slot and retire
     // only ours on close instead of clearing the whole key.
+    // A session whose scope is the chat session, not the opening task, must
+    // outlive `end_run`: that is what the map's detached mark means.
+    let detached = owner.as_ref().is_some_and(|(_, task, _)| task.is_none());
     let cancel_slot = agent_ctx
         .subagent_cancels
-        .insert(ui_id.clone(), child_trigger);
+        .insert(ui_id.clone(), child_trigger, detached);
 
     let cancellation = Arc::new(SessionCancellation {
         parent_cancels: Arc::clone(&agent_ctx.subagent_cancels),
@@ -1333,7 +1337,7 @@ impl SessionState {
             .is_some_and(|b| b.stopped.load(Ordering::Relaxed))
     }
 
-    fn close(&mut self) {
+    fn close(&mut self, failed: bool) {
         if self.closed {
             return;
         }
@@ -1343,7 +1347,7 @@ impl SessionState {
         let usage = self.params.ledger.totals().usage;
         let messages = std::mem::replace(&mut self.history, History::new(Vec::new())).into_vec();
         self.upstream
-            .send_history(&self.cancellation.ui_id, messages);
+            .send_history(&self.cancellation.ui_id, messages, failed);
         info!(
             name = %self.name,
             duration_ms = self.start.elapsed().as_millis() as u64,
@@ -1385,12 +1389,12 @@ impl Drop for LuaSession {
     fn drop(&mut self) {
         self.cancellation.cancel();
         match self.inner.try_lock() {
-            Some(mut s) => s.close(),
+            Some(mut s) => s.close(false),
             // Prompt still in flight: close asynchronously so history
             // and cancel entry are never silently leaked.
             None => {
                 let inner = Arc::clone(&self.inner);
-                smol::spawn(async move { inner.lock().await.close() }).detach();
+                smol::spawn(async move { inner.lock().await.close(false) }).detach();
             }
         }
     }
@@ -1483,6 +1487,7 @@ async fn prompt(
             opts: Some(s.opts),
             answer_tx: s.answer_tx.take(),
             inbox: Some(Arc::clone(&s.inbox)),
+            detached: false,
         });
     } else if s.background.is_some() {
         // The first prompt reaches the tab on `SubagentInfo`. Every later one
@@ -1550,7 +1555,7 @@ async fn prompt(
     // would otherwise keep it in memory until the plugin unloads.
     if s.background.is_some() {
         s.upstream
-            .send_history(&s.cancellation.ui_id, s.history.as_slice().to_vec());
+            .send_history(&s.cancellation.ui_id, s.history.as_slice().to_vec(), false);
     }
     // Only this call's messages count: older turns may hold stale preamble
     // text, and the agent loop's empty-response retry leaves a synthetic
@@ -1631,14 +1636,19 @@ async fn prompt(
 /// Close cancels a running prompt before waiting to flush its history. That
 /// prompt returns a cancelled error and any partial text.
 ///
+/// @param err string? Pass the failure reason when the run failed, so the session's UI item ends as errored even without a following tool result.
 /// @return
 #[lua_fn]
-async fn close(_lua: Lua, this: mlua::UserDataRef<LuaSession>) -> LuaResult<()> {
+async fn close(
+    _lua: Lua,
+    this: mlua::UserDataRef<LuaSession>,
+    err: Option<String>,
+) -> LuaResult<()> {
     this.cancellation.cancel();
     let inner = Arc::clone(&this.inner);
     drop(this);
     let mut s = inner.lock().await;
-    s.close();
+    s.close(err.is_some());
     Ok(())
 }
 
@@ -1749,12 +1759,18 @@ mod tests {
             if dispose {
                 drop(first.take::<LuaSession>().unwrap());
             } else {
-                close(lua.clone(), first.borrow().unwrap()).await.unwrap();
-                close(lua.clone(), first.borrow().unwrap()).await.unwrap();
+                close(lua.clone(), first.borrow().unwrap(), None)
+                    .await
+                    .unwrap();
+                close(lua.clone(), first.borrow().unwrap(), None)
+                    .await
+                    .unwrap();
             }
             let replacement = native_session(&lua, &ctx).await;
             if !dispose {
-                close(lua.clone(), first.borrow().unwrap()).await.unwrap();
+                close(lua.clone(), first.borrow().unwrap(), None)
+                    .await
+                    .unwrap();
             }
             for session in [sibling, replacement] {
                 assert!(
@@ -1767,7 +1783,9 @@ mod tests {
                         .child_cancel
                         .is_cancelled()
                 );
-                close(lua.clone(), session.borrow().unwrap()).await.unwrap();
+                close(lua.clone(), session.borrow().unwrap(), None)
+                    .await
+                    .unwrap();
             }
         });
     }
@@ -1819,6 +1837,7 @@ mod tests {
                     if let AgentEvent::SubagentHistory {
                         tool_use_id,
                         messages,
+                        failed: _,
                     } = events.recv_async().await.unwrap().event
                     {
                         assert_eq!(tool_use_id, PARENT_ID);
@@ -1923,7 +1942,9 @@ mod tests {
             let (_, error) = prompt(lua.clone(), sess.borrow().unwrap(), CHILD_REQUEST.into())
                 .await
                 .unwrap();
-            close(lua.clone(), sess.borrow().unwrap()).await.unwrap();
+            close(lua.clone(), sess.borrow().unwrap(), None)
+                .await
+                .unwrap();
             assert!(error.is_none(), "{error:?}");
         });
         assert_eq!(
@@ -2039,6 +2060,7 @@ mod tests {
             opts: None,
             answer_tx: None,
             inbox: None,
+            detached: false,
         })
         .unwrap();
         info
@@ -2154,7 +2176,7 @@ mod tests {
     #[test]
     fn history_sent_to_the_parent_carries_its_run() {
         let (upstream, parent_rx) = parent_upstream();
-        upstream.send_history(PARENT_ID, Vec::new());
+        upstream.send_history(PARENT_ID, Vec::new(), false);
         let envelope = parent_rx.try_recv().unwrap();
         assert_eq!(envelope.run_id, RUN_ID);
         assert!(matches!(

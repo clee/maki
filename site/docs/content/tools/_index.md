@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Maki ships with 21 built-in tools in this reference (20 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
+Maki ships with 26 built-in tools in this reference (22 on by default, 4 opt-in). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
 
 ## File Operations
 
@@ -171,12 +171,62 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `background` | boolean | no | Run in the background. The call returns a receipt at once, the outcome arrives as a message when the subagent finishes, and task_result or task_wait can fetch it. |
 | `description` | string | yes | Short (3-5 words) description of the task |
 | `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier):<br>- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.<br>- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.<br>- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits. |
 | `output_schema` | object | no | JSON Schema (object) the subagent's final result must match. When set, the result is returned as a validated JSON string. |
 | `prompt` | string | yes | Detailed task prompt for the agent |
 | `subagent_type` | string | no | Subagent type: "research" (read-only, default) or "general" (can modify files) |
 | `thinking` | any | no | Thinking: off\|adaptive\|minimal\|low\|medium\|high\|xhigh\|max\|int budget. Omit to inherit parent; capped at parent. |
+
+### `task_result` {#task_result}
+
+Fetch the status or final output of a background task launched with the task tool (`background = true`).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | Task id from the background receipt. |
+
+### `task_wait` {#task_wait}
+
+Block until a background task finishes or the timeout passes. Returns the result when done, a still-working note on timeout.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `task_id` | string | yes |  | Task id from the background receipt. |
+| `timeout_ms` | integer | no | 60000, cap 600000 | Maximum wait in milliseconds. |
+
+### `background_run` <span class="badge badge-optin">opt-in</span> {#background_run}
+
+Launch a program detached from maki's process group (setsid) and return immediately with its OS pid.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `command` | string | yes |  | Shell command line (runs through bash -c). |
+| `cwd` | string | no | maki's cwd | Working directory for the program. |
+| `name` | string | no | first word of the command | Short job handle. Starting a second job under a live name is refused, so a typo-proof name prevents double launches. |
+| `wake` | boolean | no | true | Start an agent turn when the process exits. False: report only at the session's next natural turn. |
+
+### `background_task` <span class="badge badge-optin">opt-in</span> {#background_task}
+
+Launch an autonomous subagent that runs in the background while the conversation continues.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `description` | string | yes | Short (3-5 words) description of the task |
+| `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier):<br>- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.<br>- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.<br>- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits. |
+| `prompt` | string | yes | Detailed task prompt for the agent |
+| `subagent_type` | string | no | Subagent type: "research" (read-only, default) or "general" (can modify files) |
+
+### `background_output` <span class="badge badge-optin">opt-in</span> {#background_output}
+
+Read the buffered output of any background work: a detached process from background_run or a finished subagent from background_task.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `id` | string | no |  | Pid or job name (background_run), or task id / task description (background_task). |
+| `lines` | integer | no | 50, max 1024 | Trailing lines to return. |
+| `stream` | string | no |  | Limit to one stream (jobs only; default: both). |
 
 ### `todo_write` {#todo_write}
 

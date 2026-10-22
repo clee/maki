@@ -34,7 +34,7 @@ declare maki: {
     get_slots: @checked () -> (any),
   },
   async: {
-    run: @checked (fn: any, on_finish: any) -> (),
+    run: @checked (fn: any, on_finish_or_opts: any) -> (),
     spawn: @checked (fn: any) -> (any),
     sleep: @checked (ms: number) -> (),
     await: @checked (argc: number, fn: any, ...any) -> (...any),
@@ -59,7 +59,7 @@ declare maki: {
     jobstop: @checked (job_id: number) -> (),
     jobforget: @checked (job_id: number) -> (),
     jobwait: @checked (job_id: number, timeout_ms: number?) -> (any, string?),
-    jobinfo: @checked (job_id: number) -> (any, string?),
+    jobinfo: @checked (job_id: number, opts: any) -> (any, string?),
     joblist: @checked (session: string?) -> (any),
     jobattach: @checked (job_id: number, opts: any) -> (boolean?, string?),
     jobfind: @checked (name: string) -> (number?, string?),
@@ -68,7 +68,7 @@ declare maki: {
     winrestview: @checked (view: any) -> (boolean?, string?),
   },
   fs: {
-    read: @checked (path: string) -> (string?, string?),
+    read: @checked (path: string, opts: any) -> (string?, string?),
     read_bytes: @checked (path: string) -> (buffer?, string?),
     metadata: @checked (path: string) -> (any, string?),
     dirname: @checked (path: string) -> (string?),
@@ -205,6 +205,8 @@ declare maki: {
     set_window_title: @checked (title: string) -> (),
     input: @checked () -> (any, string?),
     input_edit: @checked (opts: any) -> (boolean?, string?),
+    chat_item: @checked (opts: any) -> (),
+    status_segment: @checked (opts: any) -> (),
   },
   uv: {
     cwd: @checked () -> (string?),

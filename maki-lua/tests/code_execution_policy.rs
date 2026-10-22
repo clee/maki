@@ -43,10 +43,12 @@ const TOOLS_MCP_PROBE: &str = "tools_mcp_probe";
 const CLIENT_TOOL: &str = "client_probe";
 const CLIENT_TOOL_OUT: &str = "client ran";
 const EDIT_TARGET: &str = "f.rs";
-const MARKER_A: &str = "AAA";
-const MARKER_B: &str = "BBB";
-const EDITED_A: &str = "aaa";
-const EDITED_B: &str = "bbb";
+// syntax_check is force-enabled by `with_all_builtins`, so the edit scratch
+// file must hold valid Rust: comment-prefixed tokens parse, bare ones do not.
+const MARKER_A: &str = "//AAA";
+const MARKER_B: &str = "//BBB";
+const EDITED_A: &str = "//aaa";
+const EDITED_B: &str = "//bbb";
 const OPEN_TARGET: &str = "notes.txt";
 const OPEN_ORIGINAL: &str = "hello\n";
 const PLAN_FILE: &str = "plan.md";

@@ -736,6 +736,10 @@ pub enum AgentEvent {
     SubagentHistory {
         tool_use_id: String,
         messages: Vec<Message>,
+        /// True when the session closed knowing it failed. `false` leaves the
+        /// verdict to the `ToolDone` that follows in the blocking flow.
+        #[serde(default)]
+        failed: bool,
     },
     ToolSnapshot {
         id: String,
@@ -1137,7 +1141,15 @@ pub struct SubagentInfo {
     /// queue between turns, so a message lands as a user interrupt.
     #[serde(skip)]
     pub inbox: Option<Arc<crate::SubagentInbox>>,
+    /// The run outlived the turn that spawned it (a backgrounded task).
+    /// Echoed on every [`SubagentInfo`] so the UI keeps the chat live and
+    /// cancellable after the spawning run ends.
+    pub detached: bool,
 }
+
+/// Events stamped with this run id come from a session that outlived the run
+/// that spawned it, so the UI's stale-run gate must spare them.
+pub const DETACHED_RUN_ID: u64 = u64::MAX - 1;
 
 #[derive(Debug, Clone)]
 pub struct EventSender {

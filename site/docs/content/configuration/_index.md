@@ -246,6 +246,13 @@ maki.setup({
 })
 ```
 
+### `plugins.background`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `allow_model` | boolean | `false` | - | Expose a `model` input that overrides the subagent model. Only enable if you trust callers to pick an exact model themselves. |
+| `max_concurrent` | integer | `4` | 1 | Max concurrently running background subagents. |
+
 ### `plugins.bash`
 
 | Field | Type | Default | Min | Description |
